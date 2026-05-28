@@ -10,6 +10,7 @@ from typing import Optional
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
@@ -24,7 +25,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger("clip-editor")
 
-mcp = FastMCP("clip-editor")
+
+def _transport_security() -> TransportSecuritySettings:
+    """Allow the public Railway host through FastMCP's DNS-rebinding check.
+
+    DNS-rebinding protection is meaningful for localhost services; it just
+    blocks our deployment. Honor an ALLOWED_HOSTS allowlist when set, else
+    disable the check for the public deployment.
+    """
+    raw = os.environ.get("ALLOWED_HOSTS", "").strip()
+    if raw:
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[h.strip() for h in raw.split(",") if h.strip()],
+        )
+    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+
+mcp = FastMCP("clip-editor", transport_security=_transport_security())
 
 
 @mcp.tool()
