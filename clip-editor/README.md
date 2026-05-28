@@ -6,10 +6,13 @@ Transcript-based video editing for Emerge Career's student interview clips. Clau
 
 | Tool | What it does |
 |---|---|
-| `parse_transcript` | Read a transcript `.txt` from Drive → structured segments |
+| `parse_transcript` | Read a transcript `.txt` from Drive → structured segments (normalized to clip start) |
 | `preview_edit` | Show estimated duration + kept segments for a proposed cut (no rendering) |
-| `edit_clip` | Download the mp4, cut it via FFmpeg, return a download URL |
+| `edit_clip` | Single-source cut. Stream-copy on keyframes — near-instant, slight slack (~1 GOP) at cut boundaries |
+| `stitch_clips` | **Multi-source narrative**. Re-encodes parts to a common 720p/H.264/AAC format and concatenates them. Frame-accurate, slower per second of output than `edit_clip` |
 | `list_clips` | Walk a student folder and pair mp4s with their transcript siblings |
+
+`edit_clip` vs `stitch_clips`: use `edit_clip` when cutting within one clip and you can live with keyframe slack. Use `stitch_clips` whenever you need to combine segments from multiple source clips — the cross-source concat requires re-encoding to a common format anyway.
 
 ## Architecture
 

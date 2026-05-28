@@ -226,6 +226,107 @@ def edit_clip_tool(
     }
 
 
+def stitch_clips_tool(parts: list[dict], output_name: str = "narrative.mp4") -> dict:
+    """Stitch segments from multiple source clips into one narrative video.
+
+    Each part is a dict with:
+        clip_file_id (str)        — Drive file ID of the .mp4
+        transcript_file_id (str)  — Drive file ID of the .txt
+        keep_segments (list[int]) — segment indices to keep, OR
+        keep_ranges (list[dict])  — [{"start": "00:10.0", "end": "00:25.0"}, ...]
+        pad (bool, default True)  — ±150/250ms padding
+        label (str, optional)     — surfaced in error messages
+
+    Re-encodes every kept range to 1280x720 H.264/AAC so the final concat works
+    even when the source clips have different resolutions or encodings. Uses
+    -preset ultrafast for speed; expect ~3–5x realtime on Railway's tier.
+    """
+    if not parts:
+        raise ValueError("Provide at least one part to stitch")
+
+    output_name = os.path.basename(output_name) or "narrative.mp4"
+    if not output_name.lower().endswith(".mp4"):
+        output_name = output_name + ".mp4"
+
+    # Pre-flight: validate every part's size before downloading anything.
+    metas: list[drive.DriveFile] = []
+    for i, part in enumerate(parts):
+        clip_id = part.get("clip_file_id")
+        if not clip_id:
+            raise ValueError(f"part[{i}] missing clip_file_id")
+        meta = drive.get_metadata(clip_id)
+        if meta.size is not None and meta.size > MAX_INPUT_BYTES:
+            raise ValueError(
+                f"part[{i}] ({meta.name}) is "
+                f"{meta.size / 1024 / 1024:.1f} MB, over the "
+                f"{MAX_INPUT_BYTES // 1024 // 1024} MB limit"
+            )
+        metas.append(meta)
+
+    token, work_dir = downloads.make_workspace()
+    encoded_parts: list[str] = []
+    total_kept = 0
+
+    for i, part in enumerate(parts):
+        label = part.get("label") or metas[i].name
+        try:
+            clip_id = part["clip_file_id"]
+            transcript_id = part.get("transcript_file_id")
+            if not transcript_id:
+                raise ValueError("missing transcript_file_id")
+
+            segments, _, _ = _load_segments(transcript_id)
+            ranges, _ = _segments_to_ranges(
+                segments,
+                part.get("keep_segments"),
+                part.get("keep_ranges"),
+            )
+
+            source_path = os.path.join(work_dir, f"source_{i:03d}.mp4")
+            drive.download_file(clip_id, source_path)
+            duration = editor.get_duration(source_path)
+            padded = editor.apply_padding(ranges, duration, part.get("pad", True))
+
+            for j, r in enumerate(padded):
+                encoded = os.path.join(work_dir, f"part_{i:03d}_{j:03d}.mp4")
+                editor.extract_encoded(source_path, r.start, r.end, encoded)
+                encoded_parts.append(encoded)
+                total_kept += 1
+
+            os.remove(source_path)
+        except Exception as exc:
+            raise ValueError(f"Failed to process part[{i}] ({label}): {exc}") from exc
+
+    if not encoded_parts:
+        raise ValueError("No segments were kept across all parts")
+
+    output_path = os.path.join(work_dir, output_name)
+    editor.concat_parts(encoded_parts, output_path, work_dir)
+
+    # Drop the intermediate part files, keep only the stitched output.
+    for p in encoded_parts:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    concat_list = os.path.join(work_dir, "concat.txt")
+    if os.path.exists(concat_list):
+        os.remove(concat_list)
+
+    stored = downloads.register(token, output_path, output_name)
+    final_duration = editor.get_duration(stored.path)
+    ttl_hours = float(os.environ.get("DOWNLOAD_TTL_HOURS", downloads.DEFAULT_TTL_HOURS))
+
+    return {
+        "download_url": stored.download_url,
+        "duration": round(final_duration, 2),
+        "file_size_mb": round(stored.size_bytes / 1024 / 1024, 2),
+        "parts_count": len(parts),
+        "total_segments_kept": total_kept,
+        "expires_in_hours": ttl_hours,
+    }
+
+
 def list_clips_tool(student_folder_id: str) -> dict:
     folder_meta = drive.get_metadata(student_folder_id)
     event_types: dict[str, dict] = {}

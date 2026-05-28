@@ -87,6 +87,28 @@ def list_clips(student_folder_id: str) -> dict:
     return tools.list_clips_tool(student_folder_id)
 
 
+@mcp.tool()
+def stitch_clips(parts: list[dict], output_name: str = "narrative.mp4") -> dict:
+    """Stitch segments from multiple source clips into one narrative video.
+
+    Each entry in `parts` is a dict:
+        {
+            "clip_file_id": "<Drive .mp4 ID>",
+            "transcript_file_id": "<Drive .txt ID>",
+            "keep_segments": [0, 2, 5],          # OR keep_ranges
+            "keep_ranges": [{"start": "00:10.0", "end": "00:25.0"}],
+            "pad": true,
+            "label": "Roy - Stability"            # optional, used in errors
+        }
+
+    Re-encodes each kept range to 1280x720 H.264/AAC so the final concat works
+    across disparate source recordings. Frame-accurate (re-encoded), so cuts
+    land exactly where the transcript says. Slower than edit_clip per second
+    of output but produces one combined narrative file.
+    """
+    return tools.stitch_clips_tool(parts, output_name)
+
+
 async def health(_request: Request) -> Response:
     return JSONResponse({"status": "ok"})
 

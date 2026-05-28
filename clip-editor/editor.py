@@ -20,6 +20,13 @@ from dataclasses import dataclass
 PAD_PRE = 0.15
 PAD_POST = 0.25
 
+# Stitch target: 720p, 30fps, stereo 48kHz AAC. Forces all parts to identical
+# codec params so -c copy concat works across disparate source recordings.
+STITCH_WIDTH = 1280
+STITCH_HEIGHT = 720
+STITCH_FPS = 30
+STITCH_AUDIO_RATE = 48000
+
 
 class FFmpegError(RuntimeError):
     pass
@@ -122,6 +129,66 @@ def _ffmpeg_concat(part_paths: list[str], output_path: str, work_dir: str) -> No
         raise FFmpegError("ffmpeg concat timed out after 60s") from exc
 
 
+def extract_encoded(input_path: str, start: float, end: float, output_path: str) -> None:
+    """Extract a range and re-encode to the stitch target (1280x720, 30fps, AAC).
+
+    Necessary for cross-source concat — `-c copy` only works when all parts
+    share codec/resolution/fps. This normalizes everything so the final concat
+    can still use `-c copy` and stay fast.
+
+    Uses input-seek (`-ss` before `-i`) for fast seeking. The encode itself is
+    libx264 at `-preset ultrafast` so a 30s 1080p clip encodes in a few seconds
+    on Railway's shared CPU.
+    """
+    vf = (
+        f"scale={STITCH_WIDTH}:{STITCH_HEIGHT}:force_original_aspect_ratio=decrease,"
+        f"pad={STITCH_WIDTH}:{STITCH_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"setsar=1,fps={STITCH_FPS}"
+    )
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start:.3f}",
+        "-to",
+        f"{end:.3f}",
+        "-i",
+        input_path,
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        str(STITCH_AUDIO_RATE),
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg encode failed (start={start}, end={end}): "
+            f"{exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError(
+            f"ffmpeg encode timed out after 120s (start={start}, end={end})"
+        ) from exc
+
+
 def cut_clip(input_path: str, ranges: list[Range], output_path: str, work_dir: str) -> None:
     """Cut input_path into the given (already-padded) ranges and write output_path."""
     if not ranges:
@@ -136,4 +203,9 @@ def cut_clip(input_path: str, ranges: list[Range], output_path: str, work_dir: s
         part = os.path.join(work_dir, f"part_{i:03d}.mp4")
         _ffmpeg_extract(input_path, r.start, r.end, part)
         part_paths.append(part)
+    _ffmpeg_concat(part_paths, output_path, work_dir)
+
+
+def concat_parts(part_paths: list[str], output_path: str, work_dir: str) -> None:
+    """Public wrapper around the concat demuxer for already-prepared parts."""
     _ffmpeg_concat(part_paths, output_path, work_dir)
