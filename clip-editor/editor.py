@@ -1,9 +1,15 @@
 """FFmpeg cut + concat.
 
-For each keep-range:
-    - Apply 150ms pre / 250ms post padding when pad=True, clamped to file duration
-    - Extract via libx264 re-encode (frame-accurate, unlike stream copy)
-    - Concat with `-c copy` since all parts share encoding params
+Stream-copy strategy (no re-encode):
+    - `-ss` and `-to` BEFORE `-i` for fast input seeking (no full decode)
+    - `-c copy` to avoid re-encoding — cuts land on the nearest keyframe at
+      or before the requested time, so cuts are slightly longer than asked
+      (≤ one GOP of slack, usually ~2s) but the render is near-instant.
+    - For the highlight use case "rough cut is fine" — frame accuracy isn't
+      worth the cost of decoding 1080p on Railway's shared CPU.
+
+If we ever need frame-accurate cuts, add a `precise=True` flag that swaps in
+libx264 re-encode with `-ss` AFTER `-i`.
 """
 from __future__ import annotations
 
@@ -55,6 +61,7 @@ def apply_padding(ranges: list[Range], duration: float, pad: bool) -> list[Range
 
 
 def _ffmpeg_extract(input_path: str, start: float, end: float, output_path: str) -> None:
+    """Extract a single range via input-seek stream copy."""
     cmd = [
         "ffmpeg",
         "-y",
@@ -64,26 +71,24 @@ def _ffmpeg_extract(input_path: str, start: float, end: float, output_path: str)
         f"{end:.3f}",
         "-i",
         input_path,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
+        "-c",
+        "copy",
+        "-avoid_negative_ts",
+        "make_zero",
         "-movflags",
         "+faststart",
         output_path,
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=60)
     except subprocess.CalledProcessError as exc:
         raise FFmpegError(
             f"ffmpeg extract failed (start={start}, end={end}): "
             f"{exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError(
+            f"ffmpeg extract timed out after 60s (start={start}, end={end})"
         ) from exc
 
 
@@ -91,7 +96,6 @@ def _ffmpeg_concat(part_paths: list[str], output_path: str, work_dir: str) -> No
     concat_list = os.path.join(work_dir, "concat.txt")
     with open(concat_list, "w") as fh:
         for p in part_paths:
-            # ffmpeg concat demuxer requires single-quoted, escaped paths
             fh.write(f"file '{p}'\n")
     cmd = [
         "ffmpeg",
@@ -109,15 +113,17 @@ def _ffmpeg_concat(part_paths: list[str], output_path: str, work_dir: str) -> No
         output_path,
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=60)
     except subprocess.CalledProcessError as exc:
         raise FFmpegError(
             f"ffmpeg concat failed: {exc.stderr.decode(errors='replace')}"
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError("ffmpeg concat timed out after 60s") from exc
 
 
 def cut_clip(input_path: str, ranges: list[Range], output_path: str, work_dir: str) -> None:
-    """Cut input_path into the given ranges (assumed already padded) and write to output_path."""
+    """Cut input_path into the given (already-padded) ranges and write output_path."""
     if not ranges:
         raise FFmpegError("No ranges to cut")
 

@@ -104,3 +104,35 @@ def total_duration_estimate(segments: list[Segment]) -> Optional[float]:
         return None
     last = segments[-1]
     return last.end if last.end is not None else last.start
+
+
+def normalize_to_clip_start(segments: list[Segment]) -> tuple[list[Segment], float]:
+    """Shift all timestamps so the first segment starts at 0.
+
+    Cal.com keeps original-recording timestamps even when the clip is just a
+    section of the full recording (e.g. first transcript line at 03:58.9 for
+    a clip that itself starts at 00:00.0). Returns the shifted segments and
+    the offset (in seconds) that was subtracted.
+    """
+    if not segments:
+        return [], 0.0
+    offset = segments[0].start
+    if offset == 0:
+        return segments, 0.0
+    shifted: list[Segment] = []
+    for s in segments:
+        new_start = s.start - offset
+        new_end = s.end - offset if s.end is not None else None
+        shifted.append(
+            Segment(
+                index=s.index,
+                start=new_start,
+                start_ts=format_timestamp(new_start),
+                end=new_end,
+                end_ts=format_timestamp(new_end),
+                duration=s.duration,
+                speaker=s.speaker,
+                text=s.text,
+            )
+        )
+    return shifted, offset

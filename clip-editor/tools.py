@@ -22,17 +22,24 @@ MAX_INPUT_BYTES = 500 * 1024 * 1024  # 500 MB cap on source clips
 # ---------- helpers ----------
 
 
-def _load_segments(transcript_file_id: str) -> tuple[list[transcript.Segment], str]:
+def _load_segments(
+    transcript_file_id: str,
+) -> tuple[list[transcript.Segment], float, str]:
+    """Load + parse a transcript and normalize timestamps to clip-relative.
+
+    Returns (normalized segments, offset that was subtracted, raw content).
+    """
     content = drive.read_text_file(transcript_file_id)
     try:
-        return transcript.parse_transcript(content), content
+        raw_segments = transcript.parse_transcript(content)
     except transcript.TranscriptParseError as exc:
-        # Surface the raw content so Claude can diagnose format issues.
         preview = content[:500]
         raise ValueError(
             f"Failed to parse transcript {transcript_file_id}: {exc}. "
             f"First 500 chars: {preview!r}"
         ) from exc
+    normalized, offset = transcript.normalize_to_clip_start(raw_segments)
+    return normalized, offset, content
 
 
 def _segments_to_ranges(
@@ -111,11 +118,12 @@ def _parse_clip_name(filename: str) -> dict:
 
 
 def parse_transcript_tool(file_id: str) -> dict:
-    segments, _ = _load_segments(file_id)
+    segments, offset, _ = _load_segments(file_id)
     return {
         "segments": [s.to_dict() for s in segments],
         "total_duration_estimate": transcript.total_duration_estimate(segments),
         "segment_count": len(segments),
+        "clip_offset_seconds": offset,
     }
 
 
@@ -125,7 +133,7 @@ def preview_edit_tool(
     keep_ranges: Optional[list[dict]] = None,
     pad: bool = True,
 ) -> dict:
-    segments, _ = _load_segments(file_id)
+    segments, _, _ = _load_segments(file_id)
     ranges, kept_segments = _segments_to_ranges(segments, keep_segments, keep_ranges)
 
     estimated = _estimate_padded_duration(ranges, pad)
@@ -183,7 +191,7 @@ def edit_clip_tool(
             f"over the {MAX_INPUT_BYTES // 1024 // 1024} MB limit. Trim the source first."
         )
 
-    segments, _ = _load_segments(transcript_file_id)
+    segments, _, _ = _load_segments(transcript_file_id)
     ranges, _ = _segments_to_ranges(segments, keep_segments, keep_ranges)
 
     token, work_dir = downloads.make_workspace()
