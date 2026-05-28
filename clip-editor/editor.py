@@ -1,0 +1,133 @@
+"""FFmpeg cut + concat.
+
+For each keep-range:
+    - Apply 150ms pre / 250ms post padding when pad=True, clamped to file duration
+    - Extract via libx264 re-encode (frame-accurate, unlike stream copy)
+    - Concat with `-c copy` since all parts share encoding params
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+from dataclasses import dataclass
+
+PAD_PRE = 0.15
+PAD_POST = 0.25
+
+
+class FFmpegError(RuntimeError):
+    pass
+
+
+@dataclass
+class Range:
+    start: float
+    end: float
+
+
+def get_duration(path: str) -> float:
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(f"ffprobe failed: {exc.stderr.decode(errors='replace')}") from exc
+    return float(out.decode().strip())
+
+
+def apply_padding(ranges: list[Range], duration: float, pad: bool) -> list[Range]:
+    if not pad:
+        return [Range(max(0.0, r.start), min(duration, r.end)) for r in ranges]
+    return [
+        Range(max(0.0, r.start - PAD_PRE), min(duration, r.end + PAD_POST))
+        for r in ranges
+    ]
+
+
+def _ffmpeg_extract(input_path: str, start: float, end: float, output_path: str) -> None:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start:.3f}",
+        "-to",
+        f"{end:.3f}",
+        "-i",
+        input_path,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg extract failed (start={start}, end={end}): "
+            f"{exc.stderr.decode(errors='replace')}"
+        ) from exc
+
+
+def _ffmpeg_concat(part_paths: list[str], output_path: str, work_dir: str) -> None:
+    concat_list = os.path.join(work_dir, "concat.txt")
+    with open(concat_list, "w") as fh:
+        for p in part_paths:
+            # ffmpeg concat demuxer requires single-quoted, escaped paths
+            fh.write(f"file '{p}'\n")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        concat_list,
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg concat failed: {exc.stderr.decode(errors='replace')}"
+        ) from exc
+
+
+def cut_clip(input_path: str, ranges: list[Range], output_path: str, work_dir: str) -> None:
+    """Cut input_path into the given ranges (assumed already padded) and write to output_path."""
+    if not ranges:
+        raise FFmpegError("No ranges to cut")
+
+    if len(ranges) == 1:
+        _ffmpeg_extract(input_path, ranges[0].start, ranges[0].end, output_path)
+        return
+
+    part_paths: list[str] = []
+    for i, r in enumerate(ranges):
+        part = os.path.join(work_dir, f"part_{i:03d}.mp4")
+        _ffmpeg_extract(input_path, r.start, r.end, part)
+        part_paths.append(part)
+    _ffmpeg_concat(part_paths, output_path, work_dir)
