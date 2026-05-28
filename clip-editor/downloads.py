@@ -13,6 +13,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +30,24 @@ def _ttl_hours() -> float:
 
 
 def _base_url() -> str:
+    """Return scheme + host (+ port) only. Strips any path the env var may have
+    been misconfigured with — e.g. trailing `/health` would otherwise produce
+    download URLs like `.../health/downloads/...` which 404.
+    """
     base = os.environ.get("DOWNLOAD_BASE_URL")
     if not base:
         raise RuntimeError("DOWNLOAD_BASE_URL env var is not set")
-    return base.rstrip("/")
+    parsed = urlparse(base.strip())
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(
+            f"DOWNLOAD_BASE_URL must include scheme and host (got {base!r})"
+        )
+    if parsed.path and parsed.path != "/":
+        logger.warning(
+            "DOWNLOAD_BASE_URL has a path component (%r); stripping it",
+            parsed.path,
+        )
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 @dataclass
