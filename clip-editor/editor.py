@@ -209,3 +209,135 @@ def cut_clip(input_path: str, ranges: list[Range], output_path: str, work_dir: s
 def concat_parts(part_paths: list[str], output_path: str, work_dir: str) -> None:
     """Public wrapper around the concat demuxer for already-prepared parts."""
     _ffmpeg_concat(part_paths, output_path, work_dir)
+
+
+def generate_silent_black(duration: float, output_path: str) -> None:
+    """Render a black-frame, silent-audio clip at the stitch target params.
+
+    Used as the turning-point pause between rising-action and triumph phases.
+    Same codec/resolution/fps as `extract_encoded` so concat with -c copy works.
+    """
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s={STITCH_WIDTH}x{STITCH_HEIGHT}:r={STITCH_FPS}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"anullsrc=channel_layout=stereo:sample_rate={STITCH_AUDIO_RATE}",
+        "-t",
+        f"{duration:.3f}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=60)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg silent-black render failed: "
+            f"{exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError("ffmpeg silent-black render timed out") from exc
+
+
+def mix_music_with_voice(
+    video_path: str,
+    music_path: str,
+    output_path: str,
+    voice_volume: float = 1.0,
+    music_volume: float = 0.22,
+) -> None:
+    """Mix a music track under the existing voice track of a video.
+
+    Voice stays prominent; music sits underneath at ~22% by default. Output
+    duration matches the video — music shorter than video gets padded with
+    silence; longer gets cut.
+    """
+    filter_complex = (
+        f"[0:a]volume={voice_volume}[voice];"
+        f"[1:a]volume={music_volume}[music];"
+        f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
+    )
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-i",
+        music_path,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "0:v",
+        "-map",
+        "[mixed]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=180)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg audio mix failed: {exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError("ffmpeg audio mix timed out") from exc
+
+
+def burn_captions(video_path: str, ass_path: str, output_path: str) -> None:
+    """Burn an ASS subtitle file into the video. Re-encodes video; audio is copied."""
+    # FFmpeg's subtitles filter needs forward slashes and escaped colons on the path.
+    safe_path = ass_path.replace("\\", "/").replace(":", r"\:")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-vf",
+        f"subtitles={safe_path}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "copy",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=240)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg caption burn failed: {exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError("ffmpeg caption burn timed out") from exc

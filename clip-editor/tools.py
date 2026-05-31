@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Optional
 
+import captions
 import drive
 import editor
 import downloads
+import score
 import transcript
 
 logger = logging.getLogger(__name__)
@@ -226,7 +229,69 @@ def edit_clip_tool(
     }
 
 
-def stitch_clips_tool(parts: list[dict], output_name: str = "narrative.mp4") -> dict:
+@dataclass
+class _ProcessedPart:
+    """A part after extraction: the encoded sub-clips and the timed segments
+    that those sub-clips correspond to (clip-relative, then later remapped to
+    output-relative for caption timing).
+    """
+
+    encoded_paths: list[str]
+    durations: list[float]
+    timed_segments: list[captions.TimedSegment]  # output-relative timing, filled later
+
+
+def _process_part(
+    part: dict, work_dir: str, source_idx: int, metas: list[drive.DriveFile]
+) -> _ProcessedPart:
+    """Download a source mp4, cut + re-encode each kept range, collect timing info."""
+    label = part.get("label") or metas[source_idx].name
+    try:
+        clip_id = part["clip_file_id"]
+        transcript_id = part.get("transcript_file_id")
+        if not transcript_id:
+            raise ValueError("missing transcript_file_id")
+
+        segments, _, _ = _load_segments(transcript_id)
+        keep_segments_arg = part.get("keep_segments")
+        keep_ranges_arg = part.get("keep_ranges")
+        ranges, kept_segments = _segments_to_ranges(
+            segments, keep_segments_arg, keep_ranges_arg
+        )
+
+        source_path = os.path.join(work_dir, f"source_{source_idx:03d}.mp4")
+        drive.download_file(clip_id, source_path)
+        duration = editor.get_duration(source_path)
+        padded = editor.apply_padding(ranges, duration, part.get("pad", True))
+
+        encoded_paths: list[str] = []
+        durations: list[float] = []
+        timed: list[captions.TimedSegment] = []
+        for j, r in enumerate(padded):
+            encoded = os.path.join(work_dir, f"part_{source_idx:03d}_{j:03d}.mp4")
+            editor.extract_encoded(source_path, r.start, r.end, encoded)
+            encoded_paths.append(encoded)
+            d = editor.get_duration(encoded)
+            durations.append(d)
+            # Caption text: prefer the matched segment when keep_segments was used;
+            # fall back to the range itself (no text) when keep_ranges was used.
+            text = kept_segments[j].text if j < len(kept_segments) else ""
+            timed.append(captions.TimedSegment(start=0.0, end=d, text=text))
+
+        os.remove(source_path)
+        return _ProcessedPart(
+            encoded_paths=encoded_paths, durations=durations, timed_segments=timed
+        )
+    except Exception as exc:
+        raise ValueError(f"Failed to process part[{source_idx}] ({label}): {exc}") from exc
+
+
+def stitch_clips_tool(
+    parts: list[dict],
+    output_name: str = "narrative.mp4",
+    captions_enabled: bool = False,
+    music: Optional[dict] = None,
+) -> dict:
     """Stitch segments from multiple source clips into one narrative video.
 
     Each part is a dict with:
@@ -237,9 +302,18 @@ def stitch_clips_tool(parts: list[dict], output_name: str = "narrative.mp4") -> 
         pad (bool, default True)  — ±150/250ms padding
         label (str, optional)     — surfaced in error messages
 
-    Re-encodes every kept range to 1280x720 H.264/AAC so the final concat works
-    even when the source clips have different resolutions or encodings. Uses
-    -preset ultrafast for speed; expect ~3–5x realtime on Railway's tier.
+    captions_enabled (bool): burn 3-word white-on-black-outline captions
+                              keyed to the transcript text of each kept segment.
+
+    music (dict, optional): score the narrative. Shape:
+        {
+            "rising_action_through_part": int (required) — last part index
+                belonging to the struggle phase (0-indexed, inclusive).
+                Pass len(parts) - 1 to omit the triumph phase, or -1 to
+                skip rising-action.
+            "pause_seconds": float (default 2.0) — turning-point silence
+            "music_volume": float (default 0.22) — relative to voice
+        }
     """
     if not parts:
         raise ValueError("Provide at least one part to stitch")
@@ -248,7 +322,6 @@ def stitch_clips_tool(parts: list[dict], output_name: str = "narrative.mp4") -> 
     if not output_name.lower().endswith(".mp4"):
         output_name = output_name + ".mp4"
 
-    # Pre-flight: validate every part's size before downloading anything.
     metas: list[drive.DriveFile] = []
     for i, part in enumerate(parts):
         clip_id = part.get("clip_file_id")
@@ -264,54 +337,129 @@ def stitch_clips_tool(parts: list[dict], output_name: str = "narrative.mp4") -> 
         metas.append(meta)
 
     token, work_dir = downloads.make_workspace()
-    encoded_parts: list[str] = []
-    total_kept = 0
 
+    processed: list[_ProcessedPart] = []
     for i, part in enumerate(parts):
-        label = part.get("label") or metas[i].name
-        try:
-            clip_id = part["clip_file_id"]
-            transcript_id = part.get("transcript_file_id")
-            if not transcript_id:
-                raise ValueError("missing transcript_file_id")
+        processed.append(_process_part(part, work_dir, i, metas))
 
-            segments, _, _ = _load_segments(transcript_id)
-            ranges, _ = _segments_to_ranges(
-                segments,
-                part.get("keep_segments"),
-                part.get("keep_ranges"),
-            )
-
-            source_path = os.path.join(work_dir, f"source_{i:03d}.mp4")
-            drive.download_file(clip_id, source_path)
-            duration = editor.get_duration(source_path)
-            padded = editor.apply_padding(ranges, duration, part.get("pad", True))
-
-            for j, r in enumerate(padded):
-                encoded = os.path.join(work_dir, f"part_{i:03d}_{j:03d}.mp4")
-                editor.extract_encoded(source_path, r.start, r.end, encoded)
-                encoded_parts.append(encoded)
-                total_kept += 1
-
-            os.remove(source_path)
-        except Exception as exc:
-            raise ValueError(f"Failed to process part[{i}] ({label}): {exc}") from exc
-
-    if not encoded_parts:
+    total_kept = sum(len(p.encoded_paths) for p in processed)
+    if total_kept == 0:
         raise ValueError("No segments were kept across all parts")
 
-    output_path = os.path.join(work_dir, output_name)
-    editor.concat_parts(encoded_parts, output_path, work_dir)
+    # ---------- Assemble video timeline, inserting turning-point pause if scoring ----------
 
-    # Drop the intermediate part files, keep only the stitched output.
-    for p in encoded_parts:
-        try:
-            os.remove(p)
-        except OSError:
-            pass
-    concat_list = os.path.join(work_dir, "concat.txt")
-    if os.path.exists(concat_list):
-        os.remove(concat_list)
+    pause_seconds = 0.0
+    rising_through = None
+    if music:
+        rising_through = int(music.get("rising_action_through_part", -1))
+        pause_seconds = float(music.get("pause_seconds", 2.0))
+
+    pause_index = -1  # index into the flat list of encoded parts where the pause goes
+    pause_path: Optional[str] = None
+    if music and 0 <= rising_through < len(parts) - 1 and pause_seconds > 0:
+        # Pause sits between rising_through's last segment and (rising_through+1)'s first.
+        pause_index = sum(len(p.encoded_paths) for p in processed[: rising_through + 1])
+        pause_path = os.path.join(work_dir, "pause.mp4")
+        editor.generate_silent_black(pause_seconds, pause_path)
+
+    # Flatten all encoded parts in order, optionally inserting the pause.
+    flat_parts: list[str] = []
+    flat_durations: list[float] = []
+    for p in processed:
+        flat_parts.extend(p.encoded_paths)
+        flat_durations.extend(p.durations)
+    if pause_path is not None:
+        flat_parts.insert(pause_index, pause_path)
+        flat_durations.insert(pause_index, pause_seconds)
+
+    # Compute output-relative timing for each sub-clip (used for captions + music layout).
+    cursor = 0.0
+    timeline_offsets: list[float] = []
+    for d in flat_durations:
+        timeline_offsets.append(cursor)
+        cursor += d
+    total_duration = cursor
+
+    # ---------- Concat into a single mp4 ----------
+
+    stitched_path = os.path.join(work_dir, "stitched.mp4")
+    editor.concat_parts(flat_parts, stitched_path, work_dir)
+    current_video = stitched_path
+
+    # ---------- Mix in music if requested ----------
+
+    if music:
+        rising_duration = 0.0
+        triumph_duration = 0.0
+        if rising_through is not None and rising_through >= 0:
+            rising_duration = sum(
+                sum(p.durations) for p in processed[: rising_through + 1]
+            )
+        if rising_through is not None and rising_through < len(parts) - 1:
+            triumph_duration = sum(
+                sum(p.durations) for p in processed[rising_through + 1 :]
+            )
+        # If only one phase was requested, the music covers that phase only.
+        layout = score.ScoreLayout(
+            rising_duration=rising_duration,
+            pause_duration=pause_seconds if pause_index >= 0 else 0.0,
+            triumph_duration=triumph_duration,
+        )
+        score_path = os.path.join(work_dir, "score.m4a")
+        score.build_score_track(layout, score_path, work_dir)
+
+        mixed_path = os.path.join(work_dir, "mixed.mp4")
+        editor.mix_music_with_voice(
+            current_video,
+            score_path,
+            mixed_path,
+            music_volume=float(music.get("music_volume", 0.22)),
+        )
+        current_video = mixed_path
+
+    # ---------- Burn captions if requested ----------
+
+    if captions_enabled:
+        # Build a flat list of timed segments mapped onto the output timeline.
+        all_timed: list[captions.TimedSegment] = []
+        idx = 0
+        for p in processed:
+            for seg in p.timed_segments:
+                # If a pause sits before this index in the flat list, the offset already accounts for it.
+                offset = timeline_offsets[idx]
+                all_timed.append(
+                    captions.TimedSegment(
+                        start=offset, end=offset + seg.end, text=seg.text
+                    )
+                )
+                idx += 1
+            # Skip the pause's offset slot if we just crossed it.
+            if pause_index >= 0 and idx == pause_index:
+                idx += 1
+
+        ass_text = captions.build_ass(all_timed)
+        ass_path = os.path.join(work_dir, "captions.ass")
+        with open(ass_path, "w", encoding="utf-8") as fh:
+            fh.write(ass_text)
+
+        burned_path = os.path.join(work_dir, "burned.mp4")
+        editor.burn_captions(current_video, ass_path, burned_path)
+        current_video = burned_path
+
+    # ---------- Finalize ----------
+
+    output_path = os.path.join(work_dir, output_name)
+    if current_video != output_path:
+        os.rename(current_video, output_path)
+
+    # Clean up intermediates — keep only the final mp4.
+    for f in os.listdir(work_dir):
+        full = os.path.join(work_dir, f)
+        if os.path.isfile(full) and full != output_path:
+            try:
+                os.remove(full)
+            except OSError:
+                pass
 
     stored = downloads.register(token, output_path, output_name)
     final_duration = editor.get_duration(stored.path)
@@ -323,6 +471,8 @@ def stitch_clips_tool(parts: list[dict], output_name: str = "narrative.mp4") -> 
         "file_size_mb": round(stored.size_bytes / 1024 / 1024, 2),
         "parts_count": len(parts),
         "total_segments_kept": total_kept,
+        "captions": captions_enabled,
+        "music_scored": music is not None,
         "expires_in_hours": ttl_hours,
     }
 

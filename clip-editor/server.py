@@ -88,7 +88,12 @@ def list_clips(student_folder_id: str) -> dict:
 
 
 @mcp.tool()
-def stitch_clips(parts: list[dict], output_name: str = "narrative.mp4") -> dict:
+def stitch_clips(
+    parts: list[dict],
+    output_name: str = "narrative.mp4",
+    captions: bool = False,
+    music: Optional[dict] = None,
+) -> dict:
     """Stitch segments from multiple source clips into one narrative video.
 
     Each entry in `parts` is a dict:
@@ -102,11 +107,25 @@ def stitch_clips(parts: list[dict], output_name: str = "narrative.mp4") -> dict:
         }
 
     Re-encodes each kept range to 1280x720 H.264/AAC so the final concat works
-    across disparate source recordings. Frame-accurate (re-encoded), so cuts
-    land exactly where the transcript says. Slower than edit_clip per second
-    of output but produces one combined narrative file.
+    across disparate source recordings.
+
+    captions (bool): burn lowercase white-on-black-outline captions (3 words
+        per line, TikTok-style) derived from each kept segment's transcript text.
+
+    music (dict, optional): score the narrative with two-act music + a
+        turning-point pause. Shape:
+            {
+                "rising_action_through_part": 2,   # last part index of the
+                                                   #   struggle/rising-action phase
+                                                   #   (0-indexed, inclusive)
+                "pause_seconds": 2.0,              # turning-point silence (default 2.0)
+                "music_volume": 0.22               # relative to voice (default 0.22)
+            }
+        Rising-action plays from t=0 through the end of part rising_action_through_part.
+        Then a black-frame silent pause. Then triumph plays for the remaining parts.
+        Music tracks live in clip-editor/assets/ (rising action.mp3, triumph.mp3).
     """
-    return tools.stitch_clips_tool(parts, output_name)
+    return tools.stitch_clips_tool(parts, output_name, captions, music)
 
 
 async def health(_request: Request) -> Response:
