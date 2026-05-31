@@ -362,39 +362,33 @@ def stitch_clips_tool(
     if total_kept == 0:
         raise ValueError("No segments were kept across all parts")
 
-    # ---------- Assemble video timeline, inserting turning-point pause if scoring ----------
+    # ---------- Assemble video timeline ----------
 
-    pause_seconds = 0.0
-    rising_through = None
+    # Music phases (when scoring is requested):
+    #   parts [0 .. rising_through]                — rising-action music
+    #   parts [rising_through+1 .. triumph_from-1] — turning-point quote(s),
+    #                                                voice only, no music
+    #   parts [triumph_from .. end]                — triumph music
+    rising_through = -1
+    triumph_from = len(parts)  # default: no triumph phase
     if music:
         rising_through = int(music.get("rising_action_through_part", -1))
-        pause_seconds = float(music.get("pause_seconds", 2.0))
+        triumph_from = int(
+            music.get("triumph_from_part", rising_through + 1)
+        )
+        if triumph_from <= rising_through:
+            raise ValueError(
+                "music.triumph_from_part must be greater than "
+                "music.rising_action_through_part"
+            )
 
-    pause_index = -1  # index into the flat list of encoded parts where the pause goes
-    pause_path: Optional[str] = None
-    if music and 0 <= rising_through < len(parts) - 1 and pause_seconds > 0:
-        # Pause sits between rising_through's last segment and (rising_through+1)'s first.
-        pause_index = sum(len(p.encoded_paths) for p in processed[: rising_through + 1])
-        pause_path = os.path.join(work_dir, "pause.mp4")
-        editor.generate_silent_black(pause_seconds, pause_path, out_w, out_h)
-
-    # Flatten all encoded parts in order, optionally inserting the pause.
     flat_parts: list[str] = []
     flat_durations: list[float] = []
     for p in processed:
         flat_parts.extend(p.encoded_paths)
         flat_durations.extend(p.durations)
-    if pause_path is not None:
-        flat_parts.insert(pause_index, pause_path)
-        flat_durations.insert(pause_index, pause_seconds)
 
-    # Compute output-relative timing for each sub-clip (used for captions + music layout).
-    cursor = 0.0
-    timeline_offsets: list[float] = []
-    for d in flat_durations:
-        timeline_offsets.append(cursor)
-        cursor += d
-    total_duration = cursor
+    total_duration = sum(flat_durations)
 
     # ---------- Concat into a single mp4 ----------
 
@@ -405,20 +399,20 @@ def stitch_clips_tool(
     # ---------- Mix in music if requested ----------
 
     if music:
-        rising_duration = 0.0
-        triumph_duration = 0.0
-        if rising_through is not None and rising_through >= 0:
-            rising_duration = sum(
-                sum(p.durations) for p in processed[: rising_through + 1]
-            )
-        if rising_through is not None and rising_through < len(parts) - 1:
-            triumph_duration = sum(
-                sum(p.durations) for p in processed[rising_through + 1 :]
-            )
-        # If only one phase was requested, the music covers that phase only.
+        rising_duration = sum(
+            sum(p.durations)
+            for p in processed[: max(0, rising_through + 1)]
+        )
+        turning_point_duration = sum(
+            sum(p.durations)
+            for p in processed[max(0, rising_through + 1) : triumph_from]
+        )
+        triumph_duration = sum(
+            sum(p.durations) for p in processed[triumph_from:]
+        )
         layout = score.ScoreLayout(
             rising_duration=rising_duration,
-            pause_duration=pause_seconds if pause_index >= 0 else 0.0,
+            pause_duration=turning_point_duration,  # silence under the turning-point quote(s)
             triumph_duration=triumph_duration,
         )
         score_path = os.path.join(work_dir, "score.m4a")
@@ -438,20 +432,15 @@ def stitch_clips_tool(
     if captions_enabled:
         # Build a flat list of timed segments mapped onto the output timeline.
         all_timed: list[captions.TimedSegment] = []
-        idx = 0
+        cursor = 0.0
         for p in processed:
             for seg in p.timed_segments:
-                # If a pause sits before this index in the flat list, the offset already accounts for it.
-                offset = timeline_offsets[idx]
                 all_timed.append(
                     captions.TimedSegment(
-                        start=offset, end=offset + seg.end, text=seg.text
+                        start=cursor, end=cursor + seg.end, text=seg.text
                     )
                 )
-                idx += 1
-            # Skip the pause's offset slot if we just crossed it.
-            if pause_index >= 0 and idx == pause_index:
-                idx += 1
+                cursor += seg.end
 
         ass_text = captions.build_ass(all_timed, video_width=out_w, video_height=out_h)
         ass_path = os.path.join(work_dir, "captions.ass")

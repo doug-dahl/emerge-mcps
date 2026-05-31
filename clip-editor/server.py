@@ -132,17 +132,24 @@ def stitch_clips(
         Font size scales with output height so captions read the same on any
         canvas.
 
-    music (dict, optional): score the narrative with two-act music + a
-        turning-point pause. Shape:
+    music (dict, optional): score the narrative with two-act music with a
+        voice-only turning point in the middle. Shape:
             {
-                "rising_action_through_part": 2,   # last part index of the
-                                                   #   struggle/rising-action phase
-                                                   #   (0-indexed, inclusive)
-                "pause_seconds": 2.0,              # turning-point silence (default 2.0)
+                "rising_action_through_part": 1,   # last part with rising-action
+                                                   #   music (0-indexed, inclusive)
+                "triumph_from_part": 3,            # first part with triumph music
+                                                   #   (parts in between play with
+                                                   #   no backing track — that's the
+                                                   #   turning-point quote)
                 "music_volume": 0.22               # relative to voice (default 0.22)
             }
-        Rising-action plays from t=0 through the end of part rising_action_through_part.
-        Then a black-frame silent pause. Then triumph plays for the remaining parts.
+        Music phases:
+            parts [0 .. rising_action_through_part]   — rising-action backing
+            parts [..   .. triumph_from_part - 1]     — turning-point quote(s),
+                                                         voice only, no music
+            parts [triumph_from_part .. end]          — triumph backing
+        If triumph_from_part == rising_action_through_part + 1, the music
+        switches instantly (no turning-point gap).
         Music tracks live in clip-editor/assets/ (rising action.mp3, triumph.mp3).
     """
     return tools.stitch_clips_tool(
