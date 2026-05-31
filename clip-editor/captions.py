@@ -53,24 +53,47 @@ def _escape_ass_text(s: str) -> str:
     return s.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
-HEADER = """[Script Info]
-ScriptType: v4.00+
-PlayResX: 1280
-PlayResY: 720
-WrapStyle: 2
-ScaledBorderAndShadow: yes
+def _header(video_width: int, video_height: int) -> str:
+    """Generate the ASS header scaled to the actual output canvas.
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,DejaVu Sans,56,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,0,2,40,40,90,1
+    Font size and margins are calibrated against 720p (the original target);
+    we scale linearly with height for taller canvases (vertical 9:16, square,
+    etc.) so the caption stays the same relative size on screen.
+    """
+    scale = video_height / 720
+    font_size = max(28, round(56 * scale))
+    margin_v = max(40, round(90 * scale))
+    margin_h = max(20, round(40 * (video_width / 1280)))
+    outline = max(2, round(4 * scale))
+    return (
+        "[Script Info]\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {video_width}\n"
+        f"PlayResY: {video_height}\n"
+        "WrapStyle: 2\n"
+        "ScaledBorderAndShadow: yes\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,DejaVu Sans,{font_size},&H00FFFFFF,&H00FFFFFF,"
+        f"&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},0,2,"
+        f"{margin_h},{margin_h},{margin_v},1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+    )
 
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
 
-
-def build_ass(timed_segments: list[TimedSegment]) -> str:
-    """Return the full ASS file content for the given timeline."""
+def build_ass(
+    timed_segments: list[TimedSegment],
+    video_width: int = 1280,
+    video_height: int = 720,
+) -> str:
+    """Return the full ASS file content for the given timeline + canvas."""
     events: list[str] = []
     for seg in timed_segments:
         if seg.end <= seg.start:
@@ -87,4 +110,4 @@ def build_ass(timed_segments: list[TimedSegment]) -> str:
                 f"Dialogue: 0,{_format_time(chunk_start)},{_format_time(chunk_end)},"
                 f"Default,,0,0,0,,{_escape_ass_text(chunk)}"
             )
-    return HEADER + "\n".join(events) + "\n"
+    return _header(video_width, video_height) + "\n".join(events) + "\n"

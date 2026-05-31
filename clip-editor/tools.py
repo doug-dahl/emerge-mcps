@@ -242,7 +242,11 @@ class _ProcessedPart:
 
 
 def _process_part(
-    part: dict, work_dir: str, source_idx: int, metas: list[drive.DriveFile]
+    part: dict,
+    work_dir: str,
+    source_idx: int,
+    metas: list[drive.DriveFile],
+    vf: str,
 ) -> _ProcessedPart:
     """Download a source mp4, cut + re-encode each kept range, collect timing info."""
     label = part.get("label") or metas[source_idx].name
@@ -269,12 +273,10 @@ def _process_part(
         timed: list[captions.TimedSegment] = []
         for j, r in enumerate(padded):
             encoded = os.path.join(work_dir, f"part_{source_idx:03d}_{j:03d}.mp4")
-            editor.extract_encoded(source_path, r.start, r.end, encoded)
+            editor.extract_encoded(source_path, r.start, r.end, encoded, vf)
             encoded_paths.append(encoded)
             d = editor.get_duration(encoded)
             durations.append(d)
-            # Caption text: prefer the matched segment when keep_segments was used;
-            # fall back to the range itself (no text) when keep_ranges was used.
             text = kept_segments[j].text if j < len(kept_segments) else ""
             timed.append(captions.TimedSegment(start=0.0, end=d, text=text))
 
@@ -291,6 +293,8 @@ def stitch_clips_tool(
     output_name: str = "narrative.mp4",
     captions_enabled: bool = False,
     music: Optional[dict] = None,
+    aspect: str = "16:9",
+    frame_speaker: str = "none",
 ) -> dict:
     """Stitch segments from multiple source clips into one narrative video.
 
@@ -302,8 +306,17 @@ def stitch_clips_tool(
         pad (bool, default True)  — ±150/250ms padding
         label (str, optional)     — surfaced in error messages
 
+    aspect (str): "9:16" (vertical, TikTok/Reels), "1:1" (square), "4:5"
+        (Instagram portrait), or "16:9" (default, widescreen). Friendly
+        aliases accepted ("vertical", "tiktok", "square", "instagram", etc.).
+
+    frame_speaker (str): "right" or "left" crops + pans onto that panel of
+        the source (e.g. for cal.com side-by-side recordings where the
+        student is on the right). "none" (default) letterboxes/pillarboxes
+        to preserve the whole frame.
+
     captions_enabled (bool): burn 3-word white-on-black-outline captions
-                              keyed to the transcript text of each kept segment.
+        keyed to the transcript text of each kept segment.
 
     music (dict, optional): score the narrative. Shape:
         {
@@ -321,6 +334,9 @@ def stitch_clips_tool(
     output_name = os.path.basename(output_name) or "narrative.mp4"
     if not output_name.lower().endswith(".mp4"):
         output_name = output_name + ".mp4"
+
+    aspect_canonical, out_w, out_h = editor.resolve_aspect(aspect)
+    vf = editor.build_video_filter(out_w, out_h, frame_speaker)
 
     metas: list[drive.DriveFile] = []
     for i, part in enumerate(parts):
@@ -340,7 +356,7 @@ def stitch_clips_tool(
 
     processed: list[_ProcessedPart] = []
     for i, part in enumerate(parts):
-        processed.append(_process_part(part, work_dir, i, metas))
+        processed.append(_process_part(part, work_dir, i, metas, vf))
 
     total_kept = sum(len(p.encoded_paths) for p in processed)
     if total_kept == 0:
@@ -360,7 +376,7 @@ def stitch_clips_tool(
         # Pause sits between rising_through's last segment and (rising_through+1)'s first.
         pause_index = sum(len(p.encoded_paths) for p in processed[: rising_through + 1])
         pause_path = os.path.join(work_dir, "pause.mp4")
-        editor.generate_silent_black(pause_seconds, pause_path)
+        editor.generate_silent_black(pause_seconds, pause_path, out_w, out_h)
 
     # Flatten all encoded parts in order, optionally inserting the pause.
     flat_parts: list[str] = []
@@ -437,7 +453,7 @@ def stitch_clips_tool(
             if pause_index >= 0 and idx == pause_index:
                 idx += 1
 
-        ass_text = captions.build_ass(all_timed)
+        ass_text = captions.build_ass(all_timed, video_width=out_w, video_height=out_h)
         ass_path = os.path.join(work_dir, "captions.ass")
         with open(ass_path, "w", encoding="utf-8") as fh:
             fh.write(ass_text)
@@ -471,6 +487,9 @@ def stitch_clips_tool(
         "file_size_mb": round(stored.size_bytes / 1024 / 1024, 2),
         "parts_count": len(parts),
         "total_segments_kept": total_kept,
+        "aspect": aspect_canonical,
+        "resolution": f"{out_w}x{out_h}",
+        "frame_speaker": frame_speaker,
         "captions": captions_enabled,
         "music_scored": music is not None,
         "expires_in_hours": ttl_hours,

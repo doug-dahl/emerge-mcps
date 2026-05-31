@@ -93,6 +93,8 @@ def stitch_clips(
     output_name: str = "narrative.mp4",
     captions: bool = False,
     music: Optional[dict] = None,
+    aspect: str = "16:9",
+    frame_speaker: str = "none",
 ) -> dict:
     """Stitch segments from multiple source clips into one narrative video.
 
@@ -106,11 +108,29 @@ def stitch_clips(
             "label": "Roy - Stability"            # optional, used in errors
         }
 
-    Re-encodes each kept range to 1280x720 H.264/AAC so the final concat works
-    across disparate source recordings.
+    Re-encodes each kept range to a common H.264/AAC format so the final concat
+    works across disparate source recordings.
+
+    aspect (str, default "16:9"): output canvas aspect. One of
+        "9:16" (vertical, 1080x1920 — TikTok/Reels),
+        "1:1"  (square, 1080x1080 — Instagram feed),
+        "4:5"  (portrait, 1080x1350 — Instagram portrait),
+        "16:9" (widescreen, 1280x720 — default).
+        Friendly aliases accepted: "vertical", "tiktok", "reels", "square",
+        "instagram", "horizontal", etc.
+
+    frame_speaker (str, default "none"): for cal.com side-by-side recordings,
+        crop + pan onto one panel:
+        "right" — frame the participant on the right (typical: the student)
+        "left"  — frame the participant on the left
+        "none"  — letterbox/pillarbox to preserve the whole frame
+        When aspect changes (e.g. 16:9 -> 9:16) frame_speaker="right" gives a
+        portrait of just the student instead of a letterboxed full recording.
 
     captions (bool): burn lowercase white-on-black-outline captions (3 words
         per line, TikTok-style) derived from each kept segment's transcript text.
+        Font size scales with output height so captions read the same on any
+        canvas.
 
     music (dict, optional): score the narrative with two-act music + a
         turning-point pause. Shape:
@@ -125,7 +145,9 @@ def stitch_clips(
         Then a black-frame silent pause. Then triumph plays for the remaining parts.
         Music tracks live in clip-editor/assets/ (rising action.mp3, triumph.mp3).
     """
-    return tools.stitch_clips_tool(parts, output_name, captions, music)
+    return tools.stitch_clips_tool(
+        parts, output_name, captions, music, aspect, frame_speaker
+    )
 
 
 async def health(_request: Request) -> Response:

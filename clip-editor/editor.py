@@ -20,12 +20,81 @@ from dataclasses import dataclass
 PAD_PRE = 0.15
 PAD_POST = 0.25
 
-# Stitch target: 720p, 30fps, stereo 48kHz AAC. Forces all parts to identical
-# codec params so -c copy concat works across disparate source recordings.
-STITCH_WIDTH = 1280
-STITCH_HEIGHT = 720
+# Stitch target: 30fps, stereo 48kHz AAC. Width/height are now per-render
+# (driven by `aspect`), but everything inside one render uses the same dims
+# so the final concat can still use `-c copy`.
 STITCH_FPS = 30
 STITCH_AUDIO_RATE = 48000
+
+# Aspect presets — output canvas in pixels. The shorter side defaults to 1080
+# (a sane phone/social target) with the other dim derived from the ratio.
+ASPECT_PRESETS: dict[str, tuple[int, int]] = {
+    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),
+    "4:5": (1080, 1350),
+    "16:9": (1280, 720),
+}
+
+# Friendly aliases callers can use instead of the canonical strings above.
+ASPECT_ALIASES: dict[str, str] = {
+    "9:16": "9:16", "9x16": "9:16",
+    "vertical": "9:16", "portrait": "9:16",
+    "tiktok": "9:16", "reels": "9:16", "stories": "9:16",
+    "1:1": "1:1", "1x1": "1:1", "square": "1:1",
+    "4:5": "4:5", "4x5": "4:5", "instagram": "4:5",
+    "16:9": "16:9", "16x9": "16:9",
+    "horizontal": "16:9", "landscape": "16:9", "widescreen": "16:9",
+}
+
+
+def resolve_aspect(aspect: str) -> tuple[str, int, int]:
+    """Return (canonical, width, height) for an aspect input string."""
+    key = aspect.strip().lower()
+    canonical = ASPECT_ALIASES.get(key)
+    if canonical is None:
+        raise FFmpegError(
+            f"Unknown aspect {aspect!r}. Try one of: "
+            f"{', '.join(sorted(set(ASPECT_PRESETS)))}"
+        )
+    w, h = ASPECT_PRESETS[canonical]
+    return canonical, w, h
+
+
+def build_video_filter(out_w: int, out_h: int, frame_speaker: str) -> str:
+    """Compute the -vf filter chain for the encode.
+
+    frame_speaker == "none": letterbox/pillarbox to fit the canvas (preserves
+        the whole source frame, may produce black bars).
+    frame_speaker == "right" / "left": scale-to-cover then crop+pan to the
+        chosen half. Used for cal.com side-by-side recordings where the
+        student sits in one panel — pans onto them so they fill the frame.
+    """
+    if frame_speaker not in ("none", "right", "left"):
+        raise FFmpegError(
+            f"frame_speaker must be 'none', 'right', or 'left' (got {frame_speaker!r})"
+        )
+
+    if frame_speaker == "none":
+        return (
+            f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:black,"
+            f"setsar=1,fps={STITCH_FPS}"
+        )
+
+    # Scale to cover the canvas (no black bars), then crop a canvas-sized
+    # window centered on the right or left panel of the source. After the
+    # cover-scale, the source is at least out_w×out_h in both dims, so
+    # iw/4 (left panel center) or 3*iw/4 (right panel center) is meaningful.
+    if frame_speaker == "right":
+        x_expr = rf"max(0\,min(iw-{out_w}\,3*iw/4-{out_w}/2))"
+    else:  # left
+        x_expr = rf"max(0\,min(iw-{out_w}\,iw/4-{out_w}/2))"
+
+    return (
+        f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+        f"crop={out_w}:{out_h}:{x_expr}:0,"
+        f"setsar=1,fps={STITCH_FPS}"
+    )
 
 
 class FFmpegError(RuntimeError):
@@ -129,8 +198,14 @@ def _ffmpeg_concat(part_paths: list[str], output_path: str, work_dir: str) -> No
         raise FFmpegError("ffmpeg concat timed out after 60s") from exc
 
 
-def extract_encoded(input_path: str, start: float, end: float, output_path: str) -> None:
-    """Extract a range and re-encode to the stitch target (1280x720, 30fps, AAC).
+def extract_encoded(
+    input_path: str,
+    start: float,
+    end: float,
+    output_path: str,
+    vf: str,
+) -> None:
+    """Extract a range and re-encode to the stitch target (size driven by `vf`).
 
     Necessary for cross-source concat — `-c copy` only works when all parts
     share codec/resolution/fps. This normalizes everything so the final concat
@@ -140,11 +215,6 @@ def extract_encoded(input_path: str, start: float, end: float, output_path: str)
     libx264 at `-preset ultrafast` so a 30s 1080p clip encodes in a few seconds
     on Railway's shared CPU.
     """
-    vf = (
-        f"scale={STITCH_WIDTH}:{STITCH_HEIGHT}:force_original_aspect_ratio=decrease,"
-        f"pad={STITCH_WIDTH}:{STITCH_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,"
-        f"setsar=1,fps={STITCH_FPS}"
-    )
     cmd = [
         "ffmpeg",
         "-y",
@@ -211,8 +281,8 @@ def concat_parts(part_paths: list[str], output_path: str, work_dir: str) -> None
     _ffmpeg_concat(part_paths, output_path, work_dir)
 
 
-def generate_silent_black(duration: float, output_path: str) -> None:
-    """Render a black-frame, silent-audio clip at the stitch target params.
+def generate_silent_black(duration: float, output_path: str, out_w: int, out_h: int) -> None:
+    """Render a black-frame, silent-audio clip at the given dimensions.
 
     Used as the turning-point pause between rising-action and triumph phases.
     Same codec/resolution/fps as `extract_encoded` so concat with -c copy works.
@@ -223,7 +293,7 @@ def generate_silent_black(duration: float, output_path: str) -> None:
         "-f",
         "lavfi",
         "-i",
-        f"color=c=black:s={STITCH_WIDTH}x{STITCH_HEIGHT}:r={STITCH_FPS}",
+        f"color=c=black:s={out_w}x{out_h}:r={STITCH_FPS}",
         "-f",
         "lavfi",
         "-i",
