@@ -236,6 +236,96 @@ def edit_clip_tool(
     }
 
 
+def trim_silence_tool(
+    clip_file_id: str,
+    output_name: str = "trimmed_clip.mp4",
+    threshold_db: Optional[float] = None,
+    peak_offset_db: float = editor.SILENCE_PEAK_OFFSET_DB,
+    min_silence: float = editor.SILENCE_MIN_DURATION,
+    keep_pad: float = editor.SILENCE_KEEP_PAD,
+    min_clip: float = 0.0,
+) -> dict:
+    """Trim silent gaps from a clip using its audio levels (no transcript).
+
+    By default the silence threshold is *adaptive*: it's measured relative to
+    the clip's own peak loudness (`peak_offset_db` below peak), so the cut line
+    adjusts to each recording's level instead of a fixed dB — the approach
+    auto-edit tools use. Pass an explicit `threshold_db` to force an absolute
+    cut line instead. Spans quieter than the threshold for at least
+    `min_silence` seconds are removed; a `keep_pad` cushion of silence is left
+    around surviving speech; spans shorter than `min_clip` are dropped. Only the
+    audible spans are re-rendered.
+    """
+    output_name = os.path.basename(output_name) or "trimmed_clip.mp4"
+    if not output_name.lower().endswith(".mp4"):
+        output_name = output_name + ".mp4"
+
+    clip_meta = drive.get_metadata(clip_file_id)
+    if clip_meta.size is not None and clip_meta.size > MAX_INPUT_BYTES:
+        raise ValueError(
+            f"Source clip {clip_meta.name} is {clip_meta.size / 1024 / 1024:.1f} MB, "
+            f"over the {MAX_INPUT_BYTES // 1024 // 1024} MB limit. Trim the source first."
+        )
+
+    token, work_dir = downloads.make_workspace()
+    source_path = os.path.join(work_dir, "source.mp4")
+    drive.download_file(clip_file_id, source_path)
+
+    duration = editor.get_duration(source_path)
+
+    # Adaptive (default) vs. absolute threshold.
+    if threshold_db is None:
+        peak_db = editor.measure_peak_db(source_path)
+        effective_threshold = peak_db - peak_offset_db
+        threshold_mode = "adaptive"
+    else:
+        peak_db = None
+        effective_threshold = threshold_db
+        threshold_mode = "absolute"
+
+    silences = editor.detect_silences(source_path, effective_threshold, min_silence)
+    keep = editor.keep_ranges_from_silences(silences, duration, keep_pad, min_clip)
+
+    if not keep:
+        raise ValueError(
+            "The whole clip registered as silence — nothing to keep. "
+            f"The threshold was {effective_threshold:.1f} dB; try raising it "
+            "(smaller peak_offset_db, or an explicit higher threshold_db) or a "
+            "longer min_silence."
+        )
+
+    output_path = os.path.join(work_dir, output_name)
+    editor.trim_silence_render(source_path, keep, output_path)
+
+    # Remove the source; keep only the final output.
+    for entry in os.listdir(work_dir):
+        full = os.path.join(work_dir, entry)
+        if full != output_path and os.path.isfile(full):
+            try:
+                os.remove(full)
+            except OSError:
+                pass
+
+    stored = downloads.register(token, output_path, output_name)
+    final_duration = editor.get_duration(stored.path)
+    silence_removed = max(0.0, duration - final_duration)
+
+    ttl_hours = float(os.environ.get("DOWNLOAD_TTL_HOURS", downloads.DEFAULT_TTL_HOURS))
+    return {
+        "download_url": stored.download_url,
+        "original_duration": round(duration, 2),
+        "duration": round(final_duration, 2),
+        "silence_removed_seconds": round(silence_removed, 2),
+        "silences_detected": len(silences),
+        "segments_kept": len(keep),
+        "threshold_mode": threshold_mode,
+        "threshold_db": round(effective_threshold, 1),
+        "peak_db": round(peak_db, 1) if peak_db is not None else None,
+        "file_size_mb": round(stored.size_bytes / 1024 / 1024, 2),
+        "expires_in_hours": ttl_hours,
+    }
+
+
 @dataclass
 class _MergedCut:
     """A single continuous cut after coalescing contiguous segments, plus the
