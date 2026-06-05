@@ -90,13 +90,20 @@ def _segments_to_ranges(
 
 
 def _estimate_padded_duration(ranges: list[editor.Range], pad: bool) -> float:
-    """Estimate cut duration without knowing file duration (preview-only)."""
-    total = 0.0
-    for r in ranges:
-        start = max(0.0, r.start - (editor.PAD_PRE if pad else 0.0))
-        end = r.end + (editor.PAD_POST if pad else 0.0)
-        total += max(0.0, end - start)
-    return total
+    """Estimate cut duration without knowing file duration (preview-only).
+
+    Mirrors the real render: pad each range, then coalesce contiguous ones so
+    the estimate doesn't double-count the overlap between back-to-back segments.
+    """
+    padded = [
+        editor.Range(
+            max(0.0, r.start - (editor.PAD_PRE if pad else 0.0)),
+            r.end + (editor.PAD_POST if pad else 0.0),
+        )
+        for r in ranges
+    ]
+    merged = editor.merge_ranges(padded)
+    return sum(max(0.0, r.end - r.start) for r in merged)
 
 
 def _parse_clip_name(filename: str) -> dict:
@@ -230,15 +237,55 @@ def edit_clip_tool(
 
 
 @dataclass
+class _MergedCut:
+    """A single continuous cut after coalescing contiguous segments, plus the
+    transcript segments it spans (in source-time) for caption timing.
+    """
+
+    start: float
+    end: float
+    members: list[tuple[float, float, str]]  # (seg_start, seg_end, text) in source time
+
+
+@dataclass
 class _ProcessedPart:
     """A part after extraction: the encoded sub-clips and the timed segments
-    that those sub-clips correspond to (clip-relative, then later remapped to
-    output-relative for caption timing).
+    that those sub-clips correspond to. `timed_segments` is positioned relative
+    to the START OF THIS PART; the stitch step adds each part's offset.
     """
 
     encoded_paths: list[str]
     durations: list[float]
-    timed_segments: list[captions.TimedSegment]  # output-relative timing, filled later
+    timed_segments: list[captions.TimedSegment]
+    segment_count: int  # kept transcript segments (pre-merge), for reporting
+    # [start, end] of this part's footage in ORIGINAL-recording time (clip
+    # offset + kept range), used to detect overlap between adjacent parts cut
+    # from the same interview. None when timing is unavailable.
+    recording_window: Optional[tuple[float, float]]
+
+
+def _merge_cuts(
+    padded: list[editor.Range],
+    kept_segments: list[transcript.Segment],
+) -> list[_MergedCut]:
+    """Coalesce contiguous padded ranges into single cuts (so an unbroken run of
+    kept segments renders as one smooth clip instead of overlapping sub-clips
+    that replay the padding), while remembering which segments each cut spans so
+    captions can still be timed per-segment.
+    """
+    cuts: list[_MergedCut] = []
+    for idx, r in enumerate(padded):
+        seg = kept_segments[idx] if idx < len(kept_segments) else None
+        seg_start = seg.start if seg is not None else r.start
+        seg_end = seg.end if (seg is not None and seg.end is not None) else r.end
+        text = seg.text if seg is not None else ""
+        member = (seg_start, seg_end, text)
+        if cuts and cuts[-1].start <= r.start <= cuts[-1].end:
+            cuts[-1].end = max(cuts[-1].end, r.end)
+            cuts[-1].members.append(member)
+        else:
+            cuts.append(_MergedCut(start=r.start, end=r.end, members=[member]))
+    return cuts
 
 
 def _process_part(
@@ -246,9 +293,16 @@ def _process_part(
     work_dir: str,
     source_idx: int,
     metas: list[drive.DriveFile],
-    vf: str,
+    out_w: int,
+    out_h: int,
+    default_frame_speaker: str,
 ) -> _ProcessedPart:
-    """Download a source mp4, cut + re-encode each kept range, collect timing info."""
+    """Download a source mp4, cut + re-encode each kept range, collect timing info.
+
+    Each part may set its own `frame_speaker` ("left"/"right"/"none") to crop
+    onto the student's side of *that* clip — the student isn't always on the
+    same side across different interviews. Falls back to the render-wide default.
+    """
     label = part.get("label") or metas[source_idx].name
     try:
         clip_id = part["clip_file_id"]
@@ -256,7 +310,10 @@ def _process_part(
         if not transcript_id:
             raise ValueError("missing transcript_file_id")
 
-        segments, _, _ = _load_segments(transcript_id)
+        side = part.get("frame_speaker") or default_frame_speaker
+        vf = editor.build_video_filter(out_w, out_h, side)
+
+        segments, offset, _ = _load_segments(transcript_id)
         keep_segments_arg = part.get("keep_segments")
         keep_ranges_arg = part.get("keep_ranges")
         ranges, kept_segments = _segments_to_ranges(
@@ -267,25 +324,89 @@ def _process_part(
         drive.download_file(clip_id, source_path)
         duration = editor.get_duration(source_path)
         padded = editor.apply_padding(ranges, duration, part.get("pad", True))
+        cuts = _merge_cuts(padded, kept_segments)
+
+        # This part's footage span in original-recording time, so the stitch
+        # step can spot two parts (cut from the same interview) that overlap.
+        recording_window = (
+            offset + min(r.start for r in padded),
+            offset + max(r.end for r in padded),
+        )
 
         encoded_paths: list[str] = []
         durations: list[float] = []
         timed: list[captions.TimedSegment] = []
-        for j, r in enumerate(padded):
+        part_cursor = 0.0  # seconds since the start of this part
+        for j, cut in enumerate(cuts):
             encoded = os.path.join(work_dir, f"part_{source_idx:03d}_{j:03d}.mp4")
-            editor.extract_encoded(source_path, r.start, r.end, encoded, vf)
+            editor.extract_encoded(source_path, cut.start, cut.end, encoded, vf)
             encoded_paths.append(encoded)
             d = editor.get_duration(encoded)
             durations.append(d)
-            text = kept_segments[j].text if j < len(kept_segments) else ""
-            timed.append(captions.TimedSegment(start=0.0, end=d, text=text))
+            # Each spanned segment keeps its own caption window, offset within
+            # the cut by how far into the cut the segment actually starts.
+            for seg_start, seg_end, text in cut.members:
+                rel_start = part_cursor + max(0.0, seg_start - cut.start)
+                rel_end = part_cursor + min(d, seg_end - cut.start)
+                timed.append(
+                    captions.TimedSegment(start=rel_start, end=rel_end, text=text)
+                )
+            part_cursor += d
 
         os.remove(source_path)
         return _ProcessedPart(
-            encoded_paths=encoded_paths, durations=durations, timed_segments=timed
+            encoded_paths=encoded_paths,
+            durations=durations,
+            timed_segments=timed,
+            segment_count=len(ranges),
+            recording_window=recording_window,
         )
     except Exception as exc:
         raise ValueError(f"Failed to process part[{source_idx}] ({label}): {exc}") from exc
+
+
+def _same_recording(a: drive.DriveFile, b: drive.DriveFile) -> bool:
+    """True if two clips are the same interview: same file, or same Drive
+    parent folder (each interview's clips live in one event folder)."""
+    if a.id == b.id:
+        return True
+    if a.parents and b.parents:
+        return bool(set(a.parents) & set(b.parents))
+    return False
+
+
+def _overlap_warnings(
+    parts: list[dict],
+    processed: list[_ProcessedPart],
+    metas: list[drive.DriveFile],
+) -> list[str]:
+    """Flag adjacent parts whose footage overlaps in original-recording time.
+
+    The dimension and highlight clips for one student are all cut from the same
+    interview and overlap in the source recording. Placing two overlapping
+    windows back-to-back replays the shared footage (a visible repeat), which
+    segment indices alone don't reveal. We can't auto-trim without guessing at
+    editorial intent, so we surface a warning instead.
+    """
+    warnings: list[str] = []
+    for i in range(len(processed) - 1):
+        wa = processed[i].recording_window
+        wb = processed[i + 1].recording_window
+        if wa is None or wb is None:
+            continue
+        if not _same_recording(metas[i], metas[i + 1]):
+            continue  # different interviews — overlapping seconds are coincidence
+        overlap = min(wa[1], wb[1]) - max(wa[0], wb[0])
+        if overlap > 0.1:
+            la = parts[i].get("label") or metas[i].name
+            lb = parts[i + 1].get("label") or metas[i + 1].name
+            warnings.append(
+                f"Parts {i} ({la!r}) and {i + 1} ({lb!r}) are from the same "
+                f"interview and overlap by {overlap:.1f}s in the source "
+                f"recording — they will replay the same footage. Pick segments "
+                f"from non-overlapping moments, or reorder so they aren't adjacent."
+            )
+    return warnings
 
 
 def stitch_clips_tool(
@@ -304,16 +425,21 @@ def stitch_clips_tool(
         keep_segments (list[int]) — segment indices to keep, OR
         keep_ranges (list[dict])  — [{"start": "00:10.0", "end": "00:25.0"}, ...]
         pad (bool, default True)  — ±150/250ms padding
+        frame_speaker (str, optional) — "left"/"right"/"none" to crop onto the
+            student's side of THIS clip; overrides the render-wide
+            frame_speaker. Use when stitching clips from different interviews
+            where the student sits on different sides.
         label (str, optional)     — surfaced in error messages
 
     aspect (str): "9:16" (vertical, TikTok/Reels), "1:1" (square), "4:5"
         (Instagram portrait), or "16:9" (default, widescreen). Friendly
         aliases accepted ("vertical", "tiktok", "square", "instagram", etc.).
 
-    frame_speaker (str): "right" or "left" crops + pans onto that panel of
-        the source (e.g. for cal.com side-by-side recordings where the
-        student is on the right). "none" (default) letterboxes/pillarboxes
-        to preserve the whole frame.
+    frame_speaker (str): render-wide default for cropping cal.com side-by-side
+        recordings. "right"/"left" crops + pans onto that panel; "none"
+        (default) letterboxes/pillarboxes to preserve the whole frame. The
+        student is NOT always on the same side — verify per clip and set this
+        (or the per-part override) accordingly. Each part may override it.
 
     captions_enabled (bool): burn 3-word white-on-black-outline captions
         keyed to the transcript text of each kept segment.
@@ -336,7 +462,9 @@ def stitch_clips_tool(
         output_name = output_name + ".mp4"
 
     aspect_canonical, out_w, out_h = editor.resolve_aspect(aspect)
-    vf = editor.build_video_filter(out_w, out_h, frame_speaker)
+    # Validate the render-wide default up front (per-part overrides are
+    # validated inside _process_part as each part is built).
+    editor.build_video_filter(out_w, out_h, frame_speaker)
 
     metas: list[drive.DriveFile] = []
     for i, part in enumerate(parts):
@@ -356,11 +484,18 @@ def stitch_clips_tool(
 
     processed: list[_ProcessedPart] = []
     for i, part in enumerate(parts):
-        processed.append(_process_part(part, work_dir, i, metas, vf))
+        processed.append(
+            _process_part(part, work_dir, i, metas, out_w, out_h, frame_speaker)
+        )
 
-    total_kept = sum(len(p.encoded_paths) for p in processed)
-    if total_kept == 0:
+    total_cuts = sum(len(p.encoded_paths) for p in processed)
+    total_kept = sum(p.segment_count for p in processed)
+    if total_cuts == 0:
         raise ValueError("No segments were kept across all parts")
+
+    warnings = _overlap_warnings(parts, processed, metas)
+    for w in warnings:
+        logger.warning(w)
 
     # ---------- Assemble video timeline ----------
 
@@ -431,16 +566,18 @@ def stitch_clips_tool(
 
     if captions_enabled:
         # Build a flat list of timed segments mapped onto the output timeline.
+        # Each part's timed_segments are already positioned relative to that
+        # part's start; shift them by the cumulative duration of prior parts.
         all_timed: list[captions.TimedSegment] = []
-        cursor = 0.0
+        offset = 0.0
         for p in processed:
             for seg in p.timed_segments:
                 all_timed.append(
                     captions.TimedSegment(
-                        start=cursor, end=cursor + seg.end, text=seg.text
+                        start=offset + seg.start, end=offset + seg.end, text=seg.text
                     )
                 )
-                cursor += seg.end
+            offset += sum(p.durations)
 
         ass_text = captions.build_ass(all_timed, video_width=out_w, video_height=out_h)
         ass_path = os.path.join(work_dir, "captions.ass")
@@ -482,6 +619,7 @@ def stitch_clips_tool(
         "captions": captions_enabled,
         "music_scored": music is not None,
         "expires_in_hours": ttl_hours,
+        "warnings": warnings,
     }
 
 
