@@ -82,6 +82,50 @@ def edit_clip(
 
 
 @mcp.tool()
+def trim_silence(
+    clip_file_id: str,
+    output_name: str = "trimmed_clip.mp4",
+    threshold_db: Optional[float] = None,
+    peak_offset_db: float = 28.0,
+    min_silence: float = 0.5,
+    keep_pad: float = 0.1,
+    min_clip: float = 0.0,
+) -> dict:
+    """Trim silent gaps / dead air from a clip using its audio levels — no transcript.
+
+    Mimics a video editor's "trim silence" / auto-cut (the Auto-Editor model):
+    detect quiet spans from the waveform and remove them, leaving a short cushion
+    of silence so speech doesn't start or end abruptly. Re-renders only the
+    audible spans in one frame-accurate pass and returns a download URL.
+
+    threshold_db (float, optional): absolute audio level below which a span
+        counts as silence. Leave unset (default) to use an ADAPTIVE threshold
+        measured relative to the clip's own peak loudness — this is preferred
+        because it adapts to how hot/quiet the recording was. Pass a value
+        (e.g. -30) to force an absolute cut line.
+    peak_offset_db (float, default 28.0): used only in adaptive mode — the
+        silence line is set this many dB below the measured peak. Larger is
+        stricter (cuts only near-total silence); smaller trims quieter audio
+        too. (Adapts to recording level, not noise floor — a very noisy room can
+        still leave dead air above the line.)
+    min_silence (float, default 0.5): only gaps at least this many seconds long
+        are removed, so natural beats between sentences survive.
+    keep_pad (float, default 0.1): seconds of silence left on each side of every
+        kept span. Larger values sound more relaxed; 0 cuts tight to the speech.
+    min_clip (float, default 0.0): drop kept spans shorter than this many seconds
+        (filters out an isolated word or click between two long pauses). 0 keeps
+        everything audible.
+
+    Returns include threshold_mode ("adaptive"/"absolute"), the threshold_db
+    actually used, and the measured peak_db, so you can re-tune in one pass.
+    """
+    return tools.trim_silence_tool(
+        clip_file_id, output_name, threshold_db, peak_offset_db,
+        min_silence, keep_pad, min_clip,
+    )
+
+
+@mcp.tool()
 def list_clips(student_folder_id: str) -> dict:
     """List all clips and transcripts for a student across event types."""
     return tools.list_clips_tool(student_folder_id)
