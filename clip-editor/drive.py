@@ -36,6 +36,7 @@ class DriveFile:
     name: str
     mime_type: str
     size: Optional[int]
+    parents: Optional[list[str]] = None
 
 
 def _load_credentials() -> service_account.Credentials:
@@ -83,7 +84,11 @@ def get_metadata(file_id: str) -> DriveFile:
         meta = (
             get_service()
             .files()
-            .get(fileId=file_id, fields="id,name,mimeType,size", supportsAllDrives=True)
+            .get(
+                fileId=file_id,
+                fields="id,name,mimeType,size,parents",
+                supportsAllDrives=True,
+            )
             .execute()
         )
     except HttpError as exc:
@@ -93,6 +98,7 @@ def get_metadata(file_id: str) -> DriveFile:
         name=meta["name"],
         mime_type=meta.get("mimeType", ""),
         size=int(meta["size"]) if "size" in meta else None,
+        parents=meta.get("parents"),
     )
 
 

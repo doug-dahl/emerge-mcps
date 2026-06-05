@@ -105,6 +105,7 @@ def stitch_clips(
             "keep_segments": [0, 2, 5],          # OR keep_ranges
             "keep_ranges": [{"start": "00:10.0", "end": "00:25.0"}],
             "pad": true,
+            "frame_speaker": "left",              # optional per-part override
             "label": "Roy - Stability"            # optional, used in errors
         }
 
@@ -119,13 +120,17 @@ def stitch_clips(
         Friendly aliases accepted: "vertical", "tiktok", "reels", "square",
         "instagram", "horizontal", etc.
 
-    frame_speaker (str, default "none"): for cal.com side-by-side recordings,
-        crop + pan onto one panel:
-        "right" — frame the participant on the right (typical: the student)
+    frame_speaker (str, default "none"): render-wide default for cropping
+        cal.com side-by-side recordings onto one panel:
+        "right" — frame the participant on the right
         "left"  — frame the participant on the left
         "none"  — letterbox/pillarbox to preserve the whole frame
-        When aspect changes (e.g. 16:9 -> 9:16) frame_speaker="right" gives a
-        portrait of just the student instead of a letterboxed full recording.
+        The student is NOT always on the same side — the panel order varies per
+        recording, so verify (e.g. a "none" preview) before choosing. Each part
+        can override this with its own "frame_speaker" key, which is essential
+        when stitching clips from different interviews where the student sits on
+        different sides. When aspect changes (e.g. 16:9 -> 9:16) cropping gives
+        a portrait of just that person instead of a letterboxed full recording.
 
     captions (bool): burn lowercase white-on-black-outline captions (3 words
         per line, TikTok-style) derived from each kept segment's transcript text.

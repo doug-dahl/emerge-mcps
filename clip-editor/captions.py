@@ -26,12 +26,18 @@ class TimedSegment:
 
 
 def _format_time(seconds: float) -> str:
-    """ASS time format: H:MM:SS.cc (centiseconds)."""
-    seconds = max(0.0, seconds)
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds % 60
-    return f"{h:d}:{m:02d}:{s:05.2f}"
+    """ASS time format: H:MM:SS.cc (centiseconds).
+
+    Rounds to centiseconds first, then carries — so 59.999s becomes
+    ``0:01:00.00`` rather than the malformed ``0:00:60.00`` that a naive
+    ``%05.2f`` on the seconds field produces (libass mis-parses that and the
+    caption lands at the wrong time).
+    """
+    cs_total = int(round(max(0.0, seconds) * 100))
+    h, rem = divmod(cs_total, 360000)
+    m, rem = divmod(rem, 6000)
+    s, cs = divmod(rem, 100)
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
 
 def _chunk_words(text: str, words_per_chunk: int = WORDS_PER_LINE) -> list[str]:
@@ -56,21 +62,32 @@ def _escape_ass_text(s: str) -> str:
 def _header(video_width: int, video_height: int) -> str:
     """Generate the ASS header scaled to the actual output canvas.
 
-    Font size and margins are calibrated against 720p (the original target);
-    we scale linearly with height for taller canvases (vertical 9:16, square,
-    etc.) so the caption stays the same relative size on screen.
+    Font size and outline are calibrated against the 720p target (56px / 4px
+    outline) and scaled by the SHORTER screen dimension, so the caption keeps
+    a consistent on-screen size whether the canvas is landscape (16:9, short
+    side = height) or portrait/square (9:16, 4:5, 1:1, short side = width).
+
+    Scaling by height alone was the original bug: a 9:16 canvas (1080x1920)
+    produced a ~149px font on a 1080-wide frame, far too wide for a 3-word
+    line. The vertical margin still scales with height so the caption sits in
+    the lower third regardless of canvas.
+
+    WrapStyle 0 (smart, balanced wrapping) is the safety net: any 3-word line
+    that is still too wide for the frame wraps onto a second line instead of
+    running off both edges and getting clipped.
     """
-    scale = video_height / 720
+    short_side = min(video_width, video_height)
+    scale = short_side / 720
     font_size = max(28, round(56 * scale))
-    margin_v = max(40, round(90 * scale))
-    margin_h = max(20, round(40 * (video_width / 1280)))
     outline = max(2, round(4 * scale))
+    margin_v = max(40, round(90 * (video_height / 720)))
+    margin_h = max(20, round(40 * (video_width / 1280)))
     return (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
         f"PlayResX: {video_width}\n"
         f"PlayResY: {video_height}\n"
-        "WrapStyle: 2\n"
+        "WrapStyle: 0\n"
         "ScaledBorderAndShadow: yes\n"
         "\n"
         "[V4+ Styles]\n"

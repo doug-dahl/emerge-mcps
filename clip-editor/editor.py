@@ -136,6 +136,33 @@ def apply_padding(ranges: list[Range], duration: float, pad: bool) -> list[Range
     ]
 
 
+def merge_ranges(ranges: list[Range]) -> list[Range]:
+    """Coalesce ranges that overlap or abut into single continuous ranges.
+
+    Kept segments are cut individually and re-concatenated, but a transcript
+    segment's end is the *next* segment's start, so an unbroken run of speech
+    produces back-to-back ranges. Once padding (±PAD_PRE/PAD_POST) is applied
+    those ranges overlap, and cutting each separately then concatenating
+    replays the overlap — a visible backward jump + stuttered audio at every
+    boundary ("record scratch"). Merging a contiguous run into one cut keeps
+    the lead-in/tail-out padding only at the true start/end of the run.
+
+    Only merges a *forward* overlap (ascending start that lands inside the
+    current range), so a deliberately reordered or non-adjacent selection
+    (e.g. keep [6, 4]) stays as distinct cuts.
+    """
+    if not ranges:
+        return []
+    merged = [Range(ranges[0].start, ranges[0].end)]
+    for r in ranges[1:]:
+        last = merged[-1]
+        if last.start <= r.start <= last.end:
+            last.end = max(last.end, r.end)
+        else:
+            merged.append(Range(r.start, r.end))
+    return merged
+
+
 def _ffmpeg_extract(input_path: str, start: float, end: float, output_path: str) -> None:
     """Extract a single range via input-seek stream copy."""
     cmd = [
@@ -263,6 +290,10 @@ def cut_clip(input_path: str, ranges: list[Range], output_path: str, work_dir: s
     """Cut input_path into the given (already-padded) ranges and write output_path."""
     if not ranges:
         raise FFmpegError("No ranges to cut")
+
+    # Coalesce contiguous/overlapping ranges so an unbroken run of kept
+    # segments is one smooth cut, not separate cuts that replay the padding.
+    ranges = merge_ranges(ranges)
 
     if len(ranges) == 1:
         _ffmpeg_extract(input_path, ranges[0].start, ranges[0].end, output_path)
