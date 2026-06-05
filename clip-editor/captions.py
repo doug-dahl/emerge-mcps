@@ -70,7 +70,9 @@ def _header(video_width: int, video_height: int) -> str:
     Scaling by height alone was the original bug: a 9:16 canvas (1080x1920)
     produced a ~149px font on a 1080-wide frame, far too wide for a 3-word
     line. The vertical margin still scales with height so the caption sits in
-    the lower third regardless of canvas.
+    the lower third regardless of canvas, and is lifted a little above the
+    very bottom (120px @ 720p base) so it clears the social-app UI chrome
+    (TikTok/Reels/Shorts caption bars and action buttons) and stays visible.
 
     WrapStyle 0 (smart, balanced wrapping) is the safety net: any 3-word line
     that is still too wide for the frame wraps onto a second line instead of
@@ -80,7 +82,7 @@ def _header(video_width: int, video_height: int) -> str:
     scale = short_side / 720
     font_size = max(28, round(56 * scale))
     outline = max(2, round(4 * scale))
-    margin_v = max(40, round(90 * (video_height / 720)))
+    margin_v = max(56, round(120 * (video_height / 720)))
     margin_h = max(20, round(40 * (video_width / 1280)))
     return (
         "[Script Info]\n"
