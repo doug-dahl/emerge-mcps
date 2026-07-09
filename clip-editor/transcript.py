@@ -1,6 +1,9 @@
 """Cal.com-style timestamped transcript parser.
 
 Line format: `[MM:SS.S] (speaker N) text...` or `[HH:MM:SS.S] (speaker N) text...`
+The `(speaker N)` label is optional: self-recorded VideoAsk testimonials are
+single-speaker and emit `[MM:SS.S] text...` with no label. When absent the
+speaker defaults to "speaker".
 Each segment's end is inferred from the next segment's start.
 The last segment has end=None / duration=None.
 """
@@ -10,7 +13,7 @@ import re
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-LINE_RE = re.compile(r"\[(\d{1,2}:\d{2}(?::\d{2})?\.?\d*)\]\s*\(([^)]+)\)\s*(.*)")
+LINE_RE = re.compile(r"\[(\d{1,2}:\d{2}(?::\d{2})?\.?\d*)\]\s*(?:\(([^)]+)\)\s*)?(.*)")
 
 
 @dataclass
@@ -67,7 +70,7 @@ def parse_transcript(content: str) -> list[Segment]:
         match = LINE_RE.match(line.strip())
         if match:
             ts, speaker, text = match.groups()
-            raw.append((parse_timestamp(ts), speaker.strip(), text.strip()))
+            raw.append((parse_timestamp(ts), (speaker or "speaker").strip(), text.strip()))
         elif raw and line.strip():
             start, speaker, prev_text = raw[-1]
             raw[-1] = (start, speaker, (prev_text + " " + line.strip()).strip())
