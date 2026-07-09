@@ -551,18 +551,25 @@ def mix_music_with_voice(
     music_path: str,
     output_path: str,
     voice_volume: float = 1.0,
-    music_volume: float = 0.22,
+    music_volume: float = 0.35,
 ) -> None:
     """Mix a music track under the existing voice track of a video.
 
-    Voice stays prominent; music sits underneath at ~22% by default. Output
-    duration matches the video — music shorter than video gets padded with
-    silence; longer gets cut.
+    Voice stays prominent; music sits underneath. Output duration matches the
+    video — music shorter than video gets padded with silence; longer gets cut.
+
+    `normalize=0` is load-bearing: amix defaults to normalize=1, which scales
+    every input by 1/nb_inputs (halving BOTH the voice and the music). That made
+    the voice quieter than the no-music render AND dropped the music to ~-35 dB —
+    effectively inaudible. With normalize=0 the voice plays at full and
+    `music_volume` is the real bed level (a hard limiter catches any summed
+    peaks so the mix never clips).
     """
     filter_complex = (
         f"[0:a]volume={voice_volume}[voice];"
         f"[1:a]volume={music_volume}[music];"
-        f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
+        f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix];"
+        f"[mix]alimiter=limit=0.97[mixed]"
     )
     cmd = [
         "ffmpeg",
