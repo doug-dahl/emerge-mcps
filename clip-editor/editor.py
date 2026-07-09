@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from typing import Optional
 
 PAD_PRE = 0.15
 PAD_POST = 0.25
@@ -604,6 +605,72 @@ def mix_music_with_voice(
         raise FFmpegError("ffmpeg audio mix timed out") from exc
 
 
+def mix_music_bed(
+    video_path: str,
+    music_path: str,
+    output_path: str,
+    *,
+    music_volume: float = 0.25,
+    start: float = 0.0,
+    fade_in: float = 1.0,
+    fade_out: float = 2.5,
+) -> None:
+    """Lay a single music track as one continuous bed under the whole video.
+
+    Unlike `mix_music_with_voice` (which the two-act score uses), this is a
+    single track that plays start-to-finish with a gentle fade in/out — the
+    right choice for a sensitive, documentary-style piece where a phase change
+    would feel manipulative. The voice (video's own audio) stays on top; the
+    bed sits under it (same `normalize=0` + limiter approach so `music_volume`
+    is the real bed level and the sum never clips). The track is looped so it
+    never runs out on a long video, and `start` skips a soft/near-silent intro.
+    """
+    dur = get_duration(video_path)
+    out_fade_st = max(0.0, dur - fade_out)
+    filter_complex = (
+        f"[1:a]afade=t=in:st=0:d={fade_in},"
+        f"afade=t=out:st={out_fade_st:.3f}:d={fade_out},volume={music_volume}[bed];"
+        f"[0:a]volume=1.0[voice];"
+        f"[voice][bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix];"
+        f"[mix]alimiter=limit=0.97[mixed]"
+    )
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-stream_loop",
+        "-1",
+        "-ss",
+        f"{start:.3f}",
+        "-i",
+        music_path,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "0:v",
+        "-map",
+        "[mixed]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=180)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg music-bed mix failed: {exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError("ffmpeg music-bed mix timed out") from exc
+
+
 def burn_captions(video_path: str, ass_path: str, output_path: str) -> None:
     """Burn an ASS subtitle file into the video. Re-encodes video; audio is copied."""
     # FFmpeg's subtitles filter needs forward slashes and escaped colons on the path.
@@ -637,3 +704,100 @@ def burn_captions(video_path: str, ass_path: str, output_path: str) -> None:
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise FFmpegError("ffmpeg caption burn timed out") from exc
+
+
+SLATE_BG = "0x0b0b0d"  # near-black slate background
+
+
+def render_slate(
+    output_path: str,
+    out_w: int,
+    out_h: int,
+    ass_path: str,
+    seconds: float,
+    logo_path: Optional[str],
+    *,
+    bg: str = SLATE_BG,
+    fade: float = 0.4,
+    logo_frac: float = 0.42,
+    logo_y_frac: float = 0.62,
+) -> None:
+    """Render a title/closing slate: a solid-colour card with centered text
+    (from `ass_path`, rendered via libass so it wraps and centers) and an
+    optional centered logo, with a gentle fade in/out. Codec/size/fps/audio
+    match `extract_encoded` output so it concatenates with the body cleanly.
+    """
+    safe_ass = ass_path.replace("\\", "/").replace(":", r"\:")
+    fade_out_st = max(0.0, seconds - fade)
+    inputs = [
+        "-f", "lavfi", "-i", f"color=c={bg}:s={out_w}x{out_h}:r={STITCH_FPS}",
+        "-f", "lavfi",
+        "-i", f"anullsrc=channel_layout=stereo:sample_rate={STITCH_AUDIO_RATE}",
+    ]
+    if logo_path:
+        logo_w = round(out_w * logo_frac)
+        logo_y = round(out_h * logo_y_frac)
+        inputs += ["-i", logo_path]
+        filter_complex = (
+            f"[0:v]subtitles={safe_ass}[bg];"
+            f"[2:v]scale={logo_w}:-1[lg];"
+            f"[bg][lg]overlay=(W-w)/2:{logo_y}[o];"
+            f"[o]fade=t=in:st=0:d={fade},fade=t=out:st={fade_out_st:.3f}:d={fade},"
+            f"format=yuv420p,setsar=1[v]"
+        )
+    else:
+        filter_complex = (
+            f"[0:v]subtitles={safe_ass},"
+            f"fade=t=in:st=0:d={fade},fade=t=out:st={fade_out_st:.3f}:d={fade},"
+            f"format=yuv420p,setsar=1[v]"
+        )
+    cmd = [
+        "ffmpeg", "-y", *inputs, "-t", f"{seconds:.3f}",
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-r", str(STITCH_FPS), "-c:a", "aac", "-b:a", "128k",
+        "-ar", str(STITCH_AUDIO_RATE), "-ac", "2", "-movflags", "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg slate render failed: {exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError("ffmpeg slate render timed out") from exc
+
+
+def concat_reencode(part_paths: list[str], output_path: str, work_dir: str) -> None:
+    """Concatenate clips by re-encoding through the concat filter.
+
+    Unlike `concat_parts` (stream-copy demuxer, needs byte-identical codec
+    params), this re-encodes, so it joins clips produced with different encode
+    settings — e.g. slates (`render_slate`) around a captioned body — without
+    glitches at the seams.
+    """
+    if not part_paths:
+        raise FFmpegError("No parts to concat")
+    cmd = ["ffmpeg", "-y"]
+    for p in part_paths:
+        cmd += ["-i", p]
+    n = len(part_paths)
+    streams = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+    cmd += [
+        "-filter_complex", f"{streams}concat=n={n}:v=1:a=1[v][a]",
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "21", "-pix_fmt", "yuv420p",
+        "-r", str(STITCH_FPS), "-c:a", "aac", "-b:a", "160k",
+        "-ar", str(STITCH_AUDIO_RATE), "-ac", "2", "-movflags", "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg slate concat failed: {exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError("ffmpeg slate concat timed out") from exc

@@ -135,3 +135,108 @@ def build_ass(
                 f"Default,,0,0,0,,{_escape_ass_text(chunk)}"
             )
     return _header(video_width, video_height) + "\n".join(events) + "\n"
+
+
+# How long a per-part name/title chyron stays on screen (from the part's start).
+HEADER_SECONDS = 3.0
+
+
+def _ass_multiline(s: str) -> str:
+    """Escape text for an ASS field and turn real newlines into ASS `\\N` breaks."""
+    return _escape_ass_text(s).replace("\n", "\\N")
+
+
+def build_header_ass(
+    headers: list[dict],
+    video_width: int = 1280,
+    video_height: int = 720,
+) -> str:
+    """ASS for per-part name/title chyrons (top-center, opaque box).
+
+    `headers` is a list of {"header", "subheader" (optional), "start", "end"}
+    with times on the final output timeline. The two lines are drawn as
+    separately positioned events so their opaque boxes get a real vertical gap
+    instead of overlapping.
+    """
+    scale = min(video_width, video_height) / 720
+    fs = max(24, round(40 * scale))
+    sub_fs = max(18, round(28 * scale))
+    pad = max(4, round(9 * scale))
+    mv = round(video_height * 0.09)  # distance from the top edge
+    mh = max(20, round(40 * (video_width / 1280)))
+    cx = video_width // 2
+    head = (
+        "[Script Info]\nScriptType: v4.00+\n"
+        f"PlayResX: {video_width}\nPlayResY: {video_height}\n"
+        "WrapStyle: 2\nScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
+        "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
+        "MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Header,DejaVu Sans,{fs},&H00FFFFFF,&H00FFFFFF,&H40000000,"
+        f"&H00000000,-1,0,0,0,100,100,0,0,3,{pad},0,8,{mh},{mh},{mv},1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+    )
+    events: list[str] = []
+    for h in headers:
+        st = _format_time(h["start"])
+        en = _format_time(h["end"])
+        events.append(
+            f"Dialogue: 0,{st},{en},Header,,0,0,0,,"
+            f"{{\\an8\\pos({cx},{mv})}}{_ass_multiline(h['header'])}"
+        )
+        sub = h.get("subheader")
+        if sub:
+            y2 = mv + round(fs * 2.0)
+            events.append(
+                f"Dialogue: 0,{st},{en},Header,,0,0,0,,"
+                f"{{\\an8\\pos({cx},{y2})\\fs{sub_fs}\\b0}}{_ass_multiline(sub)}"
+            )
+    return head + "\n".join(events) + "\n"
+
+
+def build_slate_ass(
+    video_width: int,
+    video_height: int,
+    title: str,
+    subtitle: str | None = None,
+) -> str:
+    """ASS for a title/closing slate: a big centered title with an optional
+    smaller subtitle beneath it. Rendered over a solid card by
+    `editor.render_slate`. WrapStyle 0 wraps long lines within the margins.
+    """
+    scale = min(video_width, video_height) / 720
+    title_fs = max(30, round(60 * scale))
+    sub_fs = max(20, round(38 * scale))
+    outline = max(2, round(3 * scale))
+    mh = max(40, round(90 * (video_width / 1280)))
+    title_mv = round(video_height * 0.34)
+    sub_mv = round(video_height * 0.50)
+    head = (
+        "[Script Info]\nScriptType: v4.00+\n"
+        f"PlayResX: {video_width}\nPlayResY: {video_height}\n"
+        "WrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
+        "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
+        "MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Title,DejaVu Sans,{title_fs},&H00FFFFFF,&H00FFFFFF,&H00000000,"
+        f"&H00000000,-1,0,0,0,100,100,0,0,1,{outline},0,8,{mh},{mh},{title_mv},1\n"
+        f"Style: Sub,DejaVu Sans,{sub_fs},&H00D2D2D2,&H00D2D2D2,&H00000000,"
+        f"&H00000000,0,0,0,0,100,100,0,0,1,{outline},0,8,{mh},{mh},{sub_mv},1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+    )
+    events = [
+        f"Dialogue: 0,0:00:00.00,9:59:59.99,Title,,0,0,0,,{_ass_multiline(title)}"
+    ]
+    if subtitle:
+        events.append(
+            f"Dialogue: 0,0:00:00.00,9:59:59.99,Sub,,0,0,0,,{_ass_multiline(subtitle)}"
+        )
+    return head + "\n".join(events) + "\n"

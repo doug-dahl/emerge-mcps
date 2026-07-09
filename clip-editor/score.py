@@ -1,12 +1,14 @@
 """Build the music track that underscores the narrative.
 
 The score has three phases:
-    1. Rising action — `rising action.mp3` plays under the struggle segments
+    1. Rising action — `assets/music/cinematic.mp3` under the struggle segments
     2. Turning point — pure silence for N seconds
-    3. Triumph     — `triumph.mp3` plays under the triumph segments
+    3. Triumph     — `assets/music/uplifting.mp3` under the triumph segments
 
 Tracks are looped and trimmed to fit. The final track is the same length as
-the video so we can mix it 1:1 without offset bookkeeping.
+the video so we can mix it 1:1 without offset bookkeeping. All bundled tracks
+are royalty-free (Kevin MacLeod, CC BY 4.0 — see assets/music/CREDITS.md);
+override either slot with the RISING_ACTION_PATH / TRIUMPH_PATH env vars.
 """
 from __future__ import annotations
 
@@ -14,8 +16,8 @@ import os
 import subprocess
 from dataclasses import dataclass
 
-DEFAULT_RISING_ACTION = "assets/rising action.mp3"
-DEFAULT_TRIUMPH = "assets/triumph.mp3"
+DEFAULT_RISING_ACTION = "assets/music/cinematic.mp3"
+DEFAULT_TRIUMPH = "assets/music/uplifting.mp3"
 
 
 class ScoreError(RuntimeError):

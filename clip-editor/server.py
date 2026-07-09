@@ -139,6 +139,11 @@ def stitch_clips(
     music: Optional[dict] = None,
     aspect: str = "16:9",
     frame_speaker: str = "none",
+    music_bed: Optional[str] = None,
+    music_bed_volume: float = 0.25,
+    music_bed_start: float = 0.0,
+    intro: Optional[dict] = None,
+    outro: Optional[dict] = None,
 ) -> dict:
     """Stitch segments from multiple source clips into one narrative video.
 
@@ -148,6 +153,8 @@ def stitch_clips(
             "transcript_file_id": "<Drive .txt ID>",
             "keep_segments": [0, 2, 5],          # OR keep_ranges
             "keep_ranges": [{"start": "00:10.0", "end": "00:25.0"}],
+            "header": "Michael Dimick",                     # optional name/title chyron (first ~3s of this part)
+            "subheader": "U.S. Army Veteran · Lynn, MA",    # optional 2nd chyron line
             "pad": true,
             "frame_speaker": "left",              # optional per-part override
             "label": "Roy - Stability"            # optional, used in errors
@@ -199,10 +206,38 @@ def stitch_clips(
             parts [triumph_from_part .. end]          — triumph backing
         If triumph_from_part == rising_action_through_part + 1, the music
         switches instantly (no turning-point gap).
-        Music tracks live in clip-editor/assets/ (rising action.mp3, triumph.mp3).
+        The default score tracks are royalty-free (Kevin MacLeod, CC BY 4.0);
+        see clip-editor/assets/music/CREDITS.md.
+
+    music_bed (str, optional): lay ONE track as a single continuous bed under
+        the whole video (gentle fade in/out) instead of the two-act `music`
+        score — the better fit for sensitive/documentary stories. Accepts a
+        bundled royalty-free bed name — "hopeful", "calm", "cinematic",
+        "uplifting" — or a path to your own audio file. Mutually exclusive with
+        `music`.
+    music_bed_volume (float, default 0.25): bed level relative to the voice.
+    music_bed_start (float, default 0.0): seconds to skip into the track (to
+        avoid a soft/near-silent intro).
+
+    intro / outro (dict, optional): a branded title / closing slate before /
+        after the video — a solid card with centered text and the Emerge logo,
+        with a gentle fade. Shape:
+            {
+                "title": "He served in the U.S. Army.",   # required; "\\n" for a line break
+                "subtitle": "After 9/11, he worked Ground Zero.",  # optional
+                "seconds": 4.0,                            # optional hold time
+                "logo": true                               # optional, show Emerge logo (default)
+            }
+        With `music_bed`, the bed plays continuously under the slates too — the
+        recipe for a polished, branded funder/testimony piece.
     """
     return tools.stitch_clips_tool(
-        parts, output_name, captions, music, aspect, frame_speaker
+        parts, output_name, captions, music, aspect, frame_speaker,
+        music_bed=music_bed,
+        music_bed_volume=music_bed_volume,
+        music_bed_start=music_bed_start,
+        intro=intro,
+        outro=outro,
     )
 
 
