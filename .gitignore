@@ -12,6 +12,7 @@ venv/
 # Music tracks under each MCP's assets/ are checked in so they ship with the
 # Docker image. Override the ignore for those paths:
 !clip-editor/assets/*.mp3
+!clip-editor/assets/music/*.mp3
 .DS_Store
 .idea/
 .vscode/

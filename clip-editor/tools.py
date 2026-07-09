@@ -21,6 +21,33 @@ logger = logging.getLogger(__name__)
 
 MAX_INPUT_BYTES = 500 * 1024 * 1024  # 500 MB cap on source clips
 
+# Bundled royalty-free bed tracks (Kevin MacLeod, CC BY 4.0). See
+# assets/music/CREDITS.md. `music_bed` accepts one of these names or a file path.
+ASSETS_MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "music")
+
+
+def _resolve_music_bed(name: str) -> str:
+    """Resolve a music_bed value to an mp3 path.
+
+    Accepts a bundled bed name ("hopeful", "calm", "cinematic", "uplifting") or
+    an absolute/relative path to an audio file.
+    """
+    if os.path.isfile(name):
+        return name
+    fn = name if name.lower().endswith(".mp3") else f"{name}.mp3"
+    candidate = os.path.join(ASSETS_MUSIC_DIR, fn)
+    if os.path.isfile(candidate):
+        return candidate
+    available = (
+        sorted(f[:-4] for f in os.listdir(ASSETS_MUSIC_DIR) if f.lower().endswith(".mp3"))
+        if os.path.isdir(ASSETS_MUSIC_DIR)
+        else []
+    )
+    raise ValueError(
+        f"music_bed {name!r} not found. Bundled beds: {', '.join(available) or '(none)'}. "
+        f"Or pass a path to an audio file."
+    )
+
 
 # ---------- helpers ----------
 
@@ -506,6 +533,9 @@ def stitch_clips_tool(
     music: Optional[dict] = None,
     aspect: str = "16:9",
     frame_speaker: str = "none",
+    music_bed: Optional[str] = None,
+    music_bed_volume: float = 0.25,
+    music_bed_start: float = 0.0,
 ) -> dict:
     """Stitch segments from multiple source clips into one narrative video.
 
@@ -534,7 +564,8 @@ def stitch_clips_tool(
     captions_enabled (bool): burn 3-word white-on-black-outline captions
         keyed to the transcript text of each kept segment.
 
-    music (dict, optional): score the narrative. Shape:
+    music (dict, optional): score the narrative with the two-act rising/triumph
+        structure. Shape:
         {
             "rising_action_through_part": int (required) — last part index
                 belonging to the struggle phase (0-indexed, inclusive).
@@ -543,9 +574,26 @@ def stitch_clips_tool(
             "pause_seconds": float (default 2.0) — turning-point silence
             "music_volume": float (default 0.22) — relative to voice
         }
+
+    music_bed (str, optional): lay ONE track as a single continuous bed under
+        the whole video (gentle fade in/out), instead of the two-act `music`
+        score. Best for sensitive/documentary stories where a phase change would
+        feel manipulative. Accepts a bundled bed name — "hopeful", "calm",
+        "cinematic", "uplifting" (royalty-free, Kevin MacLeod, CC BY 4.0; see
+        assets/music/CREDITS.md) — or a path to your own audio file. Mutually
+        exclusive with `music`.
+    music_bed_volume (float, default 0.25): bed level relative to the voice.
+    music_bed_start (float, default 0.0): seconds to skip into the track (use to
+        avoid a soft/near-silent intro).
     """
     if not parts:
         raise ValueError("Provide at least one part to stitch")
+
+    if music_bed and music:
+        raise ValueError(
+            "Provide either `music_bed` (single continuous bed) or `music` "
+            "(two-act score), not both."
+        )
 
     output_name = os.path.basename(output_name) or "narrative.mp4"
     if not output_name.lower().endswith(".mp4"):
@@ -623,7 +671,18 @@ def stitch_clips_tool(
 
     # ---------- Mix in music if requested ----------
 
-    if music:
+    if music_bed:
+        bed_path = _resolve_music_bed(music_bed)
+        bedded_path = os.path.join(work_dir, "bedded.mp4")
+        editor.mix_music_bed(
+            current_video,
+            bed_path,
+            bedded_path,
+            music_volume=float(music_bed_volume),
+            start=float(music_bed_start),
+        )
+        current_video = bedded_path
+    elif music:
         rising_duration = sum(
             sum(p.durations)
             for p in processed[: max(0, rising_through + 1)]
@@ -708,6 +767,7 @@ def stitch_clips_tool(
         "frame_speaker": frame_speaker,
         "captions": captions_enabled,
         "music_scored": music is not None,
+        "music_bed": music_bed,
         "expires_in_hours": ttl_hours,
         "warnings": warnings,
     }

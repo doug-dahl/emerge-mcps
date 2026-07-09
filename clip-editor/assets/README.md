@@ -1,14 +1,26 @@
 # Audio assets
 
-Music tracks used by `stitch_clips` when scoring is requested.
+Royalty-free music used by `stitch_clips`. All tracks live in
+[`music/`](music/) and are baked into the Docker image at build time — add a
+track there and redeploy to make it available.
 
-| File | Used when |
-|---|---|
-| `rising action.mp3` | Plays under the struggle/rising-action portion of the narrative |
-| `triumph.mp3` | Plays under the triumph portion (after the turning-point pause) |
+Every bundled track is by **Kevin MacLeod (incompetech.com)**, licensed
+**Creative Commons: By Attribution 4.0** — see [`music/CREDITS.md`](music/CREDITS.md)
+for the per-file title and the attribution line to include when publishing.
 
-The MCP server reads these from `clip-editor/assets/` at render time. They're baked into the Docker image at build time, so add new tracks here and redeploy.
+| Track | Mood | Used by |
+|---|---|---|
+| `music/cinematic.mp3` | building, emotional | default **rising-action** phase of the two-act `music` score |
+| `music/uplifting.mp3` | bright, hopeful | default **triumph** phase of the two-act `music` score |
+| `music/hopeful.mp3` | slow, emotional | `music_bed` option |
+| `music/calm.mp3` | gentle, reflective | `music_bed` option |
 
-Both filenames are referenced verbatim by the server. Renaming a file or removing one will fail `stitch_clips` calls that request scoring. Override paths via env vars (`RISING_ACTION_PATH`, `TRIUMPH_PATH`) if needed.
+## Two ways to score a video
 
-Tracks are looped and trimmed to fit the timeline — no manual length-matching needed.
+- **`music` (two-act score)** — rising-action → optional silent turning point →
+  triumph. Tracks are looped and trimmed to fit. Override the two slots with the
+  `RISING_ACTION_PATH` / `TRIUMPH_PATH` env vars.
+- **`music_bed` (single continuous bed)** — one track under the whole video with
+  a gentle fade in/out; the better fit for sensitive/documentary stories. Pass a
+  bundled bed name (`hopeful`, `calm`, `cinematic`, `uplifting`) or a path to
+  your own file. Mutually exclusive with `music`.

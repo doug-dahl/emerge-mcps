@@ -551,18 +551,25 @@ def mix_music_with_voice(
     music_path: str,
     output_path: str,
     voice_volume: float = 1.0,
-    music_volume: float = 0.22,
+    music_volume: float = 0.35,
 ) -> None:
     """Mix a music track under the existing voice track of a video.
 
-    Voice stays prominent; music sits underneath at ~22% by default. Output
-    duration matches the video — music shorter than video gets padded with
-    silence; longer gets cut.
+    Voice stays prominent; music sits underneath. Output duration matches the
+    video — music shorter than video gets padded with silence; longer gets cut.
+
+    `normalize=0` is load-bearing: amix defaults to normalize=1, which scales
+    every input by 1/nb_inputs (halving BOTH the voice and the music). That made
+    the voice quieter than the no-music render AND dropped the music to ~-35 dB —
+    effectively inaudible. With normalize=0 the voice plays at full and
+    `music_volume` is the real bed level (a hard limiter catches any summed
+    peaks so the mix never clips).
     """
     filter_complex = (
         f"[0:a]volume={voice_volume}[voice];"
         f"[1:a]volume={music_volume}[music];"
-        f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0[mixed]"
+        f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix];"
+        f"[mix]alimiter=limit=0.97[mixed]"
     )
     cmd = [
         "ffmpeg",
@@ -595,6 +602,72 @@ def mix_music_with_voice(
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise FFmpegError("ffmpeg audio mix timed out") from exc
+
+
+def mix_music_bed(
+    video_path: str,
+    music_path: str,
+    output_path: str,
+    *,
+    music_volume: float = 0.25,
+    start: float = 0.0,
+    fade_in: float = 1.0,
+    fade_out: float = 2.5,
+) -> None:
+    """Lay a single music track as one continuous bed under the whole video.
+
+    Unlike `mix_music_with_voice` (which the two-act score uses), this is a
+    single track that plays start-to-finish with a gentle fade in/out — the
+    right choice for a sensitive, documentary-style piece where a phase change
+    would feel manipulative. The voice (video's own audio) stays on top; the
+    bed sits under it (same `normalize=0` + limiter approach so `music_volume`
+    is the real bed level and the sum never clips). The track is looped so it
+    never runs out on a long video, and `start` skips a soft/near-silent intro.
+    """
+    dur = get_duration(video_path)
+    out_fade_st = max(0.0, dur - fade_out)
+    filter_complex = (
+        f"[1:a]afade=t=in:st=0:d={fade_in},"
+        f"afade=t=out:st={out_fade_st:.3f}:d={fade_out},volume={music_volume}[bed];"
+        f"[0:a]volume=1.0[voice];"
+        f"[voice][bed]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix];"
+        f"[mix]alimiter=limit=0.97[mixed]"
+    )
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-stream_loop",
+        "-1",
+        "-ss",
+        f"{start:.3f}",
+        "-i",
+        music_path,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "0:v",
+        "-map",
+        "[mixed]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=180)
+    except subprocess.CalledProcessError as exc:
+        raise FFmpegError(
+            f"ffmpeg music-bed mix failed: {exc.stderr.decode(errors='replace')}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError("ffmpeg music-bed mix timed out") from exc
 
 
 def burn_captions(video_path: str, ass_path: str, output_path: str) -> None:

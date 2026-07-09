@@ -139,6 +139,9 @@ def stitch_clips(
     music: Optional[dict] = None,
     aspect: str = "16:9",
     frame_speaker: str = "none",
+    music_bed: Optional[str] = None,
+    music_bed_volume: float = 0.25,
+    music_bed_start: float = 0.0,
 ) -> dict:
     """Stitch segments from multiple source clips into one narrative video.
 
@@ -199,10 +202,24 @@ def stitch_clips(
             parts [triumph_from_part .. end]          — triumph backing
         If triumph_from_part == rising_action_through_part + 1, the music
         switches instantly (no turning-point gap).
-        Music tracks live in clip-editor/assets/ (rising action.mp3, triumph.mp3).
+        The default score tracks are royalty-free (Kevin MacLeod, CC BY 4.0);
+        see clip-editor/assets/music/CREDITS.md.
+
+    music_bed (str, optional): lay ONE track as a single continuous bed under
+        the whole video (gentle fade in/out) instead of the two-act `music`
+        score — the better fit for sensitive/documentary stories. Accepts a
+        bundled royalty-free bed name — "hopeful", "calm", "cinematic",
+        "uplifting" — or a path to your own audio file. Mutually exclusive with
+        `music`.
+    music_bed_volume (float, default 0.25): bed level relative to the voice.
+    music_bed_start (float, default 0.0): seconds to skip into the track (to
+        avoid a soft/near-silent intro).
     """
     return tools.stitch_clips_tool(
-        parts, output_name, captions, music, aspect, frame_speaker
+        parts, output_name, captions, music, aspect, frame_speaker,
+        music_bed=music_bed,
+        music_bed_volume=music_bed_volume,
+        music_bed_start=music_bed_start,
     )
 
 
