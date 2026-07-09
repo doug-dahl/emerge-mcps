@@ -24,3 +24,10 @@ for the per-file title and the attribution line to include when publishing.
   a gentle fade in/out; the better fit for sensitive/documentary stories. Pass a
   bundled bed name (`hopeful`, `calm`, `cinematic`, `uplifting`) or a path to
   your own file. Mutually exclusive with `music`.
+
+## Brand
+
+`brand/emerge-logo-light.png` — the Emerge Career wordmark (red mark + white
+text) for the dark title/closing slates. `stitch_clips`'s `intro` / `outro`
+slates show it by default (`"logo": false` to hide). Drop a replacement here to
+rebrand; slates still render if it's missing (logo is just skipped).

@@ -25,6 +25,11 @@ MAX_INPUT_BYTES = 500 * 1024 * 1024  # 500 MB cap on source clips
 # assets/music/CREDITS.md. `music_bed` accepts one of these names or a file path.
 ASSETS_MUSIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "music")
 
+# Emerge logo shown on title/closing slates (light/knockout version for the dark
+# card). Slates still render if it's missing — the logo is just skipped.
+ASSETS_BRAND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "brand")
+DEFAULT_LOGO = os.path.join(ASSETS_BRAND_DIR, "emerge-logo-light.png")
+
 
 def _resolve_music_bed(name: str) -> str:
     """Resolve a music_bed value to an mp3 path.
@@ -536,6 +541,8 @@ def stitch_clips_tool(
     music_bed: Optional[str] = None,
     music_bed_volume: float = 0.25,
     music_bed_start: float = 0.0,
+    intro: Optional[dict] = None,
+    outro: Optional[dict] = None,
 ) -> dict:
     """Stitch segments from multiple source clips into one narrative video.
 
@@ -549,6 +556,11 @@ def stitch_clips_tool(
             student's side of THIS clip; overrides the render-wide
             frame_speaker. Use when stitching clips from different interviews
             where the student sits on different sides.
+        header (str, optional)    — top-center name/title chyron shown for the
+            first ~3s of this part (e.g. the student's name). Put it on the
+            part where they first appear.
+        subheader (str, optional) — second, smaller chyron line under `header`
+            (e.g. "U.S. Army Veteran · Lynn, MA").
         label (str, optional)     — surfaced in error messages
 
     aspect (str): "9:16" (vertical, TikTok/Reels), "1:1" (square), "4:5"
@@ -585,6 +597,19 @@ def stitch_clips_tool(
     music_bed_volume (float, default 0.25): bed level relative to the voice.
     music_bed_start (float, default 0.0): seconds to skip into the track (use to
         avoid a soft/near-silent intro).
+
+    intro / outro (dict, optional): a title / closing slate before / after the
+        body — a solid card with centered text and the Emerge logo, with a
+        gentle fade. Shape:
+        {
+            "title": str (required) — big headline; use "\\n" for a line break
+            "subtitle": str (optional) — smaller line beneath
+            "seconds": float (default 4.0) — how long the card holds
+            "logo": bool (default True) — show the Emerge logo
+        }
+        With `music_bed`, the bed plays continuously under the slates too. Great
+        for a branded funder/testimony piece: intro states who they are, outro
+        carries the tagline + logo.
     """
     if not parts:
         raise ValueError("Provide at least one part to stitch")
@@ -669,20 +694,9 @@ def stitch_clips_tool(
     editor.concat_parts(flat_parts, stitched_path, work_dir)
     current_video = stitched_path
 
-    # ---------- Mix in music if requested ----------
+    # ---------- Two-act score (body only; music_bed is applied after slates) ----------
 
-    if music_bed:
-        bed_path = _resolve_music_bed(music_bed)
-        bedded_path = os.path.join(work_dir, "bedded.mp4")
-        editor.mix_music_bed(
-            current_video,
-            bed_path,
-            bedded_path,
-            music_volume=float(music_bed_volume),
-            start=float(music_bed_start),
-        )
-        current_video = bedded_path
-    elif music:
+    if music:
         rising_duration = sum(
             sum(p.durations)
             for p in processed[: max(0, rising_through + 1)]
@@ -737,6 +751,73 @@ def stitch_clips_tool(
         editor.burn_captions(current_video, ass_path, burned_path)
         current_video = burned_path
 
+    # ---------- Burn per-part name/title header chyrons ----------
+
+    headers_meta: list[dict] = []
+    cursor = 0.0
+    for p, part in zip(processed, parts):
+        d = sum(p.durations)
+        hdr = part.get("header")
+        if hdr:
+            headers_meta.append({
+                "header": hdr,
+                "subheader": part.get("subheader"),
+                "start": cursor,
+                "end": cursor + min(captions.HEADER_SECONDS, d),
+            })
+        cursor += d
+    if headers_meta:
+        header_ass = captions.build_header_ass(headers_meta, video_width=out_w, video_height=out_h)
+        header_ass_path = os.path.join(work_dir, "headers.ass")
+        with open(header_ass_path, "w", encoding="utf-8") as fh:
+            fh.write(header_ass)
+        headered_path = os.path.join(work_dir, "headered.mp4")
+        editor.burn_captions(current_video, header_ass_path, headered_path)
+        current_video = headered_path
+
+    # ---------- Title / closing slates ----------
+
+    def _build_slate(spec: dict, name: str) -> str:
+        title = spec.get("title")
+        if not title:
+            raise ValueError(f"{name} slate requires a 'title'")
+        slate_ass = captions.build_slate_ass(out_w, out_h, title, spec.get("subtitle"))
+        slate_ass_path = os.path.join(work_dir, f"{name}.ass")
+        with open(slate_ass_path, "w", encoding="utf-8") as fh:
+            fh.write(slate_ass)
+        logo = DEFAULT_LOGO if (spec.get("logo", True) and os.path.isfile(DEFAULT_LOGO)) else None
+        slate_out = os.path.join(work_dir, f"{name}.mp4")
+        editor.render_slate(
+            slate_out, out_w, out_h, slate_ass_path,
+            float(spec.get("seconds", 4.0)), logo,
+        )
+        return slate_out
+
+    sequence: list[str] = []
+    if intro:
+        sequence.append(_build_slate(intro, "intro"))
+    sequence.append(current_video)
+    if outro:
+        sequence.append(_build_slate(outro, "outro"))
+    if len(sequence) > 1:
+        assembled_path = os.path.join(work_dir, "assembled.mp4")
+        editor.concat_reencode(sequence, assembled_path, work_dir)
+        current_video = assembled_path
+
+    # ---------- Music bed: one continuous track under the whole video (incl. slates) ----------
+
+    if music_bed:
+        bed_path = _resolve_music_bed(music_bed)
+        bedded_path = os.path.join(work_dir, "bedded.mp4")
+        editor.mix_music_bed(
+            current_video,
+            bed_path,
+            bedded_path,
+            music_volume=float(music_bed_volume),
+            start=float(music_bed_start),
+        )
+        current_video = bedded_path
+
     # ---------- Finalize ----------
 
     output_path = os.path.join(work_dir, output_name)
@@ -768,6 +849,9 @@ def stitch_clips_tool(
         "captions": captions_enabled,
         "music_scored": music is not None,
         "music_bed": music_bed,
+        "headers": len(headers_meta),
+        "intro": bool(intro),
+        "outro": bool(outro),
         "expires_in_hours": ttl_hours,
         "warnings": warnings,
     }
