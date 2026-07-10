@@ -18,6 +18,11 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
+# ffmpeg / ffprobe binaries. Default to whatever is on PATH; the local installer
+# points these at a bundled/downloaded static build (with libass) via env vars.
+FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
+FFPROBE = os.environ.get("FFPROBE_BIN", "ffprobe")
+
 PAD_PRE = 0.15
 PAD_POST = 0.25
 
@@ -125,7 +130,7 @@ def get_duration(path: str) -> float:
     try:
         out = subprocess.check_output(
             [
-                "ffprobe",
+                FFPROBE,
                 "-v",
                 "error",
                 "-show_entries",
@@ -192,7 +197,7 @@ def detect_silences(
     matching end, so we close it at the clip duration.
     """
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-i",
         input_path,
         "-af",
@@ -267,7 +272,7 @@ def measure_peak_db(input_path: str) -> float:
     adapts to each clip's level (a clip recorded hot vs. quiet gets the same
     treatment). volumedetect prints `max_volume: -3.0 dB` to stderr.
     """
-    cmd = ["ffmpeg", "-i", input_path, "-af", "volumedetect", "-f", "null", "-"]
+    cmd = [FFMPEG, "-i", input_path, "-af", "volumedetect", "-f", "null", "-"]
     try:
         proc = subprocess.run(cmd, check=True, capture_output=True, timeout=180)
     except subprocess.CalledProcessError as exc:
@@ -302,7 +307,7 @@ def adaptive_silence_threshold(
 def _ffmpeg_extract(input_path: str, start: float, end: float, output_path: str) -> None:
     """Extract a single range via input-seek stream copy."""
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-y",
         "-ss",
         f"{start:.3f}",
@@ -337,7 +342,7 @@ def _ffmpeg_concat(part_paths: list[str], output_path: str, work_dir: str) -> No
         for p in part_paths:
             fh.write(f"file '{p}'\n")
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-y",
         "-f",
         "concat",
@@ -379,7 +384,7 @@ def extract_encoded(
     on Railway's shared CPU.
     """
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-y",
         "-ss",
         f"{start:.3f}",
@@ -462,7 +467,7 @@ def trim_silence_render(input_path: str, keep: list[Range], output_path: str) ->
         )
     expr = "+".join(f"between(t,{r.start:.3f},{r.end:.3f})" for r in keep)
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-y",
         "-i",
         input_path,
@@ -508,7 +513,7 @@ def generate_silent_black(duration: float, output_path: str, out_w: int, out_h: 
     Same codec/resolution/fps as `extract_encoded` so concat with -c copy works.
     """
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-y",
         "-f",
         "lavfi",
@@ -573,7 +578,7 @@ def mix_music_with_voice(
         f"[mix]alimiter=limit=0.97[mixed]"
     )
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-y",
         "-i",
         video_path,
@@ -635,7 +640,7 @@ def mix_music_bed(
         f"[mix]alimiter=limit=0.97[mixed]"
     )
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-y",
         "-i",
         video_path,
@@ -676,7 +681,7 @@ def burn_captions(video_path: str, ass_path: str, output_path: str) -> None:
     # FFmpeg's subtitles filter needs forward slashes and escaped colons on the path.
     safe_path = ass_path.replace("\\", "/").replace(":", r"\:")
     cmd = [
-        "ffmpeg",
+        FFMPEG,
         "-y",
         "-i",
         video_path,
@@ -752,7 +757,7 @@ def render_slate(
             f"format=yuv420p,setsar=1[v]"
         )
     cmd = [
-        "ffmpeg", "-y", *inputs, "-t", f"{seconds:.3f}",
+        FFMPEG, "-y", *inputs, "-t", f"{seconds:.3f}",
         "-filter_complex", filter_complex,
         "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
@@ -780,7 +785,7 @@ def concat_reencode(part_paths: list[str], output_path: str, work_dir: str) -> N
     """
     if not part_paths:
         raise FFmpegError("No parts to concat")
-    cmd = ["ffmpeg", "-y"]
+    cmd = [FFMPEG, "-y"]
     for p in part_paths:
         cmd += ["-i", p]
     n = len(part_paths)
