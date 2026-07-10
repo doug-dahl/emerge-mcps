@@ -16,14 +16,52 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 
-import downloads
-import tools
-
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger("clip-editor")
+
+
+def _load_env_file() -> Optional[str]:
+    """Load KEY=VALUE lines from a local env file into os.environ (local mode).
+
+    Claude Code / Claude Desktop launch this server as a stdio subprocess, so
+    creds come from a file rather than a shell export. Checked in order:
+    $CLIP_EDITOR_ENV, then <repo>/.env, then ~/.emerge/clip-editor.env.
+    Existing environment variables always win (setdefault), so a hosted
+    deployment that injects real env vars is never overridden.
+    """
+    candidates = [
+        os.environ.get("CLIP_EDITOR_ENV"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        os.path.expanduser("~/.emerge/clip-editor.env"),
+    ]
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+        return path
+    return None
+
+
+# Load local config BEFORE importing the engine: editor.py reads FFMPEG_BIN /
+# FFPROBE_BIN at import time, so os.environ must be populated first. On hosted
+# deployments no env file exists and injected env vars win (setdefault), so
+# this is a harmless no-op there.
+_loaded_env_path = _load_env_file()
+
+import downloads  # noqa: E402
+import tools  # noqa: E402
+
+if _loaded_env_path:
+    logger.info("loaded env from %s", _loaded_env_path)
 
 
 def _transport_security() -> TransportSecuritySettings:
@@ -290,5 +328,16 @@ app = build_app()
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    transport = os.environ.get("CLIP_EDITOR_TRANSPORT", "http").lower()
+    if transport == "stdio":
+        # Local desktop mode: Claude Code / Claude Desktop launch this as a
+        # stdio subprocess and manage its lifecycle. No HTTP server, no
+        # DOWNLOAD_BASE_URL — rendered files are returned as local paths.
+        try:
+            downloads.cleanup_expired()
+        except Exception:
+            logger.exception("startup cleanup failed")
+        mcp.run(transport="stdio")
+    else:
+        port = int(os.environ.get("PORT", "8000"))
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

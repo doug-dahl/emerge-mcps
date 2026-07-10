@@ -69,18 +69,28 @@ def make_workspace() -> tuple[str, str]:
 
 
 def register(token: str, output_path: str, filename: str) -> StoredFile:
-    """Move the rendered file under the token directory, name it `filename`, return URL info."""
+    """Move the rendered file under the token directory, name it `filename`, return URL info.
+
+    Hosted (Railway) mode: DOWNLOAD_BASE_URL is set, so `download_url` is an HTTP
+    URL served by the /downloads endpoint. Local mode: DOWNLOAD_BASE_URL is unset
+    (there's no HTTP server), so `download_url` is the absolute path to the file
+    on disk — which is exactly what a teammate wants to open/upload.
+    """
     directory = os.path.join(_temp_dir(), token)
     final_path = os.path.join(directory, filename)
     if os.path.abspath(output_path) != os.path.abspath(final_path):
         shutil.move(output_path, final_path)
     size = os.path.getsize(final_path)
+    if os.environ.get("DOWNLOAD_BASE_URL"):
+        download_url = f"{_base_url()}/downloads/{token}/{filename}"
+    else:
+        download_url = final_path
     return StoredFile(
         token=token,
         filename=filename,
         path=final_path,
         size_bytes=size,
-        download_url=f"{_base_url()}/downloads/{token}/{filename}",
+        download_url=download_url,
     )
 
 
