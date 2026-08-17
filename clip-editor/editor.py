@@ -366,12 +366,43 @@ def _ffmpeg_concat(part_paths: list[str], output_path: str, work_dir: str) -> No
         raise FFmpegError("ffmpeg concat timed out after 60s") from exc
 
 
+def has_audio(path: str) -> bool:
+    """True when the file carries at least one audio stream.
+
+    B-roll is sometimes shot silent, and a part with no audio track would break
+    the `-c copy` concat against parts that have one — so callers synthesize
+    silence for those.
+    """
+    try:
+        probe = subprocess.run(
+            [
+                FFPROBE,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return b"audio" in probe.stdout
+
+
 def extract_encoded(
     input_path: str,
     start: float,
     end: float,
     output_path: str,
     vf: str,
+    af: Optional[str] = None,
 ) -> None:
     """Extract a range and re-encode to the stitch target (size driven by `vf`).
 
@@ -382,7 +413,12 @@ def extract_encoded(
     Uses input-seek (`-ss` before `-i`) for fast seeking. The encode itself is
     libx264 at `-preset ultrafast` so a 30s 1080p clip encodes in a few seconds
     on Railway's shared CPU.
+
+    `af` is an optional audio filter chain — e.g. `"volume=0.2"` to duck a
+    b-roll insert's natural sound under the narration. Ignored for silent
+    sources, which get a generated silent track instead.
     """
+    silent_source = not has_audio(input_path)
     cmd = [
         FFMPEG,
         "-y",
@@ -392,8 +428,25 @@ def extract_encoded(
         f"{end:.3f}",
         "-i",
         input_path,
+    ]
+    if silent_source:
+        # No audio to cut: generate silence so this part still concats cleanly
+        # against parts that have sound. `-shortest` stops the (endless)
+        # anullsrc at the end of the video.
+        cmd += [
+            "-f",
+            "lavfi",
+            "-i",
+            f"anullsrc=channel_layout=stereo:sample_rate={STITCH_AUDIO_RATE}",
+            "-shortest",
+        ]
+    cmd += [
         "-vf",
         vf,
+    ]
+    if af and not silent_source:
+        cmd += ["-af", af]
+    cmd += [
         "-c:v",
         "libx264",
         "-preset",

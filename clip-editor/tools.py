@@ -384,6 +384,9 @@ class _ProcessedPart:
     # offset + kept range), used to detect overlap between adjacent parts cut
     # from the same interview. None when timing is unavailable.
     recording_window: Optional[tuple[float, float]]
+    # True for a b-roll insert (no transcript). Its window is raw time in its
+    # own file, not a window into a shared interview recording.
+    is_broll: bool = False
 
 
 def _merge_cuts(
@@ -429,23 +432,51 @@ def _process_part(
     try:
         clip_id = part["clip_file_id"]
         transcript_id = part.get("transcript_file_id")
-        if not transcript_id:
-            raise ValueError("missing transcript_file_id")
-
-        side = part.get("frame_speaker") or default_frame_speaker
-        vf = editor.build_video_filter(out_w, out_h, side)
-
-        segments, offset, _ = _load_segments(transcript_id)
         keep_segments_arg = part.get("keep_segments")
         keep_ranges_arg = part.get("keep_ranges")
+
+        # frame_speaker picks one person's panel out of a two-panel cal.com
+        # recording. B-roll has no panels, so it ignores the render-wide default
+        # (which would crop-pan into half a truck) unless this part asks for a
+        # crop itself.
+        side = part.get("frame_speaker") or (
+            default_frame_speaker if transcript_id else "none"
+        )
+        vf = editor.build_video_filter(out_w, out_h, side)
+
+        if transcript_id:
+            segments, offset, _ = _load_segments(transcript_id)
+        else:
+            # B-roll insert: no spoken content, so there are no transcript
+            # segments to index — the part has to address its footage by time.
+            if not keep_ranges_arg:
+                raise ValueError(
+                    "a part with no transcript_file_id is treated as a b-roll "
+                    "insert and must use keep_ranges (there are no transcript "
+                    "segments to index into)"
+                )
+            segments, offset = [], 0.0
+
         ranges, kept_segments = _segments_to_ranges(
             segments, keep_segments_arg, keep_ranges_arg
         )
 
+        volume = part.get("volume")
+        af = None
+        if volume is not None:
+            vol = float(volume)
+            if vol < 0:
+                raise ValueError(f"volume must be >= 0 (got {volume})")
+            af = f"volume={vol:.3f}"
+
         source_path = os.path.join(work_dir, f"source_{source_idx:03d}.mp4")
         drive.download_file(clip_id, source_path)
         duration = editor.get_duration(source_path)
-        padded = editor.apply_padding(ranges, duration, part.get("pad", True))
+        # Padding exists to keep cuts from clipping the first/last word, so it
+        # only makes sense for speech — a b-roll insert gets the exact range asked for.
+        padded = editor.apply_padding(
+            ranges, duration, part.get("pad", bool(transcript_id))
+        )
         cuts = _merge_cuts(padded, kept_segments)
 
         # This part's footage span in original-recording time, so the stitch
@@ -461,13 +492,15 @@ def _process_part(
         part_cursor = 0.0  # seconds since the start of this part
         for j, cut in enumerate(cuts):
             encoded = os.path.join(work_dir, f"part_{source_idx:03d}_{j:03d}.mp4")
-            editor.extract_encoded(source_path, cut.start, cut.end, encoded, vf)
+            editor.extract_encoded(source_path, cut.start, cut.end, encoded, vf, af)
             encoded_paths.append(encoded)
             d = editor.get_duration(encoded)
             durations.append(d)
             # Each spanned segment keeps its own caption window, offset within
             # the cut by how far into the cut the segment actually starts.
             for seg_start, seg_end, text in cut.members:
+                if not text.strip():
+                    continue  # b-roll insert — nothing said, nothing to caption
                 rel_start = part_cursor + max(0.0, seg_start - cut.start)
                 rel_end = part_cursor + min(d, seg_end - cut.start)
                 timed.append(
@@ -482,6 +515,7 @@ def _process_part(
             timed_segments=timed,
             segment_count=len(ranges),
             recording_window=recording_window,
+            is_broll=not transcript_id,
         )
     except Exception as exc:
         raise ValueError(f"Failed to process part[{source_idx}] ({label}): {exc}") from exc
@@ -516,7 +550,14 @@ def _overlap_warnings(
         wb = processed[i + 1].recording_window
         if wa is None or wb is None:
             continue
-        if not _same_recording(metas[i], metas[i + 1]):
+        if processed[i].is_broll or processed[i + 1].is_broll:
+            # A b-roll window is raw time in its own file, not a window into a
+            # shared interview. Sharing a parent folder means nothing here —
+            # a whole b-roll library sits in one folder — so only the same file
+            # can actually replay footage.
+            if metas[i].id != metas[i + 1].id:
+                continue
+        elif not _same_recording(metas[i], metas[i + 1]):
             continue  # different interviews — overlapping seconds are coincidence
         overlap = min(wa[1], wb[1]) - max(wa[0], wb[0])
         if overlap > 0.1:
@@ -524,9 +565,9 @@ def _overlap_warnings(
             lb = parts[i + 1].get("label") or metas[i + 1].name
             warnings.append(
                 f"Parts {i} ({la!r}) and {i + 1} ({lb!r}) are from the same "
-                f"interview and overlap by {overlap:.1f}s in the source "
-                f"recording — they will replay the same footage. Pick segments "
-                f"from non-overlapping moments, or reorder so they aren't adjacent."
+                f"source and overlap by {overlap:.1f}s of that recording — they "
+                f"will replay the same footage. Pick segments from "
+                f"non-overlapping moments, or reorder so they aren't adjacent."
             )
     return warnings
 
@@ -548,13 +589,24 @@ def stitch_clips_tool(
 
     Each part is a dict with:
         clip_file_id (str)        — Drive file ID of the .mp4
-        transcript_file_id (str)  — Drive file ID of the .txt
+        transcript_file_id (str)  — Drive file ID of the .txt. OMIT for a
+            b-roll insert (footage with nothing spoken in it): the part then
+            addresses its footage by time via keep_ranges, contributes no
+            captions, and is skipped by the same-recording overlap check.
         keep_segments (list[int]) — segment indices to keep, OR
         keep_ranges (list[dict])  — [{"start": "00:10.0", "end": "00:25.0"}, ...]
-        pad (bool, default True)  — ±150/250ms padding
+            (required for a b-roll part — no transcript means no indices)
+        volume (float, optional)  — scale this part's own audio. 1.0 keeps it
+            as-is (default); use ~0.15–0.3 to tuck a b-roll insert's truck
+            ambience under the story, or 0 to mute it entirely.
+        pad (bool)                — ±150/250ms padding so a cut doesn't clip
+            the first/last word. Defaults True for transcript parts, False for
+            b-roll inserts (which get exactly the range you asked for).
         frame_speaker (str, optional) — "left"/"right"/"none" to crop onto the
             student's side of THIS clip; overrides the render-wide
-            frame_speaker. Use when stitching clips from different interviews
+            frame_speaker. A b-roll part ignores the render-wide default (it has
+            no side-by-side panels to pick from) unless you set it here.
+            Use when stitching clips from different interviews
             where the student sits on different sides.
         header (str, optional)    — top-center name/title chyron shown for the
             first ~3s of this part (e.g. the student's name). Put it on the
