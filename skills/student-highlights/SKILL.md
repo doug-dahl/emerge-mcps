@@ -59,6 +59,21 @@ Each event type folder contains the same two flavors of clip:
 
 When the user asks for "a story" or doesn't specify a dimension, prefer **highlight clips** (`Highlight -` in the name) — those were selected specifically for broadcast potential.
 
+### `High Quality Content/` — not a cohort
+
+One folder at the Shared Drive root breaks the pattern above: **`High Quality
+Content/`** holds professionally shot material from in-person shoots (two-camera
+interviews, plus b-roll of trucks, yards, and students on site) rather than
+cal.com recordings. Don't walk it as a cohort — there are no city or student
+subfolders and no dimension/highlight clips inside.
+
+It matters for two reasons: the b-roll is the only cutaway footage Emerge has, and
+the students in it were shot on camera with consent, so their material is the
+strongest thing available for external audiences. If a request lands on one of
+those students, or the teammate wants something more polished than a webcam clip,
+say so and point at **video-production**'s `references/broll-library.md`, which
+inventories that folder shot by shot.
+
 ### Interview type progression
 
 Not every student has every interview type — it depends on where they are in the funnel. A student early in enrollment will only have enrollment clips. A student further along may have enrollment + job search sync clips. Treat whatever's available as the full picture for that student; don't flag missing types as a problem.

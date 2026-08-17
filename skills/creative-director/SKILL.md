@@ -63,6 +63,7 @@ Proposed cut (~55s) — vertical 9:16, framed on Roy, captions on
 1. OPEN   — Roy [enrollment, seg 0–1]: "I've been waiting a long time." (4s)
 2. BUILD  — Roy [enrollment, seg 5–6]: "our benefits are getting drained… I know what's coming." (15s)
 3. TURN   — Roy [enrollment, seg 9]: "that's how I decided to make a change." (5s)
+   + cutaway: train-yard (3s) under the turn
 4. CLOSE  — Roy [job search, seg 12–13]: "I signed my lease last week." (8s)
 
 Music: gentle bed ("hopeful")   ·   ends on the lease
@@ -71,6 +72,14 @@ Music: gentle bed ("hopeful")   ·   ends on the lease
 Find the **turning point** — the spoken line where the story shifts from struggle
 to forward motion ("that's when I knew…"). It shapes the scoring choice in Step 4.
 Let the teammate reorder, swap, add, or drop before you render.
+
+**Plan the cutaways here, not later.** These interviews are all talking heads, and
+Emerge has one library of professionally shot b-roll (trucks, the yard, the cone
+course, a CDL trailer) that most of it is people-free and reusable in any
+student's video. Pick shots while you're shaping beats — put one where someone
+names a thing the library shows, or where two same-angle soundbites would collide.
+The shot list, with what's on screen and who's cleared to appear, is
+`references/broll-library.md` in **video-production**.
 
 ### Step 4 — Produce and deliver (video-production)
 

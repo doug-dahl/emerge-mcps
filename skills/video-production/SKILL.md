@@ -22,6 +22,7 @@ changes the outcome.
 
 - The **Drive file IDs** for each source clip (.mp4) and its transcript (.txt).
 - The **order of beats** — which segments from which clips, in what sequence.
+- Which beats want a **cutaway** — `references/broll-library.md` has the shot list.
 
 If the narrative isn't decided yet, stop and go through **creative-director**
 (brief → find clips via student-highlights → plan the story) first. Don't render
@@ -33,14 +34,15 @@ before the story is chosen.
 - `clip-editor:parse_transcript(file_id)` — parse a transcript into indexed segments (index, start, end, speaker, text). **Always parse before editing** — you pass these segment indices to the edit tools.
 - `clip-editor:preview_edit(file_id, keep_segments|keep_ranges)` — cheap dry run of one clip's duration/content. Call freely.
 - `clip-editor:edit_clip(...)` — trim ONE clip (fast stream-copy, ~2s keyframe precision). For simple single-clip cuts.
-- `clip-editor:stitch_clips(parts, output_name, aspect, frame_speaker, captions, music, music_bed, ...)` — the main tool: takes segments from one or more clips, re-encodes to a common format, concatenates in `parts` order. Frame-accurate. Use for anything multi-beat.
+- `clip-editor:stitch_clips(parts, output_name, aspect, frame_speaker, captions, music, music_bed, ...)` — the main tool: takes segments from one or more clips, re-encodes to a common format, concatenates in `parts` order. Frame-accurate. Use for anything multi-beat. A part that omits `transcript_file_id` is a **b-roll insert** (see below).
 
 ## Workflow
 
 1. **Parse** each source transcript (`parse_transcript`) and confirm the segment indices for each beat.
 2. **Preview** durations if unsure (`preview_edit`).
-3. **Stitch** — one `stitch_clips` call. Output plays in `parts` order (`parts[0]` first); within a part, segments emit in the order listed in `keep_segments`.
-4. **Fix the download URL** (see below) and **deliver** with a short arc summary.
+3. **Pick cutaways** from the b-roll library (see below) for the beats that call for one.
+4. **Stitch** — one `stitch_clips` call. Output plays in `parts` order (`parts[0]` first); within a part, segments emit in the order listed in `keep_segments`.
+5. **Fix the download URL** (see below) and **deliver** with a short arc summary.
 
 ```
 clip-editor:stitch_clips(
@@ -77,6 +79,43 @@ interviewer is the Emerge staffer — often headphones + office/bookshelf
 background), then set the side. Each part can set its own `frame_speaker` (needed
 for multi-student compilations where the side differs per interview). If you
 can't verify, ship `"none"`.
+
+## B-roll (cutaways) — read `references/broll-library.md`
+
+Interview clips are talking heads. Emerge has one library of professionally shot
+cutaway footage — trucks, the yard, the cone course, a CDL trailer, a student
+hanging off a trailer door — sitting in the *Student Interviews* Shared Drive at
+`High Quality Content/8.5.26 Sunny GC Visit (DOP Interviews)/`.
+**`references/broll-library.md` lists every clip with its Drive file ID, duration,
+who is on screen, and the beat it fits. Read it before you stitch anything longer
+than a single clip** — cutting a talking head straight through when a truck shot
+was available is the most common miss.
+
+Reach for a cutaway when: someone names a thing the library shows ("truck," "the
+road," "study guides," "instructors"), a splice would otherwise be a same-angle
+jump cut, or there's a pause worth covering.
+
+A b-roll part has no transcript — omit `transcript_file_id` and address the
+footage by time, ducking its live yard ambience with `volume`:
+
+```
+{ "clip_file_id": "1NfulWN_7O0A7eiNCZUkphudR7jc1E9XF",
+  "keep_ranges": [{"start": "00:02.0", "end": "00:07.0"}],
+  "volume": 0.2, "label": "b-roll: hanging off the truck" }
+```
+
+Three rules that are easy to get wrong:
+
+- **Match the folder to your aspect** — a 16:9 cutaway in a `9:16` render
+  letterboxes into a thin strip, it does not crop to fill. Vertical renders pull
+  from `Raheine Social (9x16)`.
+- **Most of the library is people-free and reusable in any student's video.** The
+  clips that show Raheine are cleared for *his* stories only — a viewer reads the
+  person on screen as the narrator. The library file marks which is which.
+- **Keep it short and don't leave dead air.** Parts play in sequence, so an insert
+  pauses the narration for its whole duration. Hold inserts to ~2–3s, or place
+  them where a sentence has actually landed. Doug's standing note: words over the
+  b-roll, never silent breathers.
 
 ## Captions
 

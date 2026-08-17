@@ -14,6 +14,8 @@ Transcript-based video editing for Emerge Career's student interview clips. Clau
 
 `edit_clip` vs `stitch_clips`: use `edit_clip` when cutting within one clip and you can live with keyframe slack. Use `stitch_clips` whenever you need to combine segments from multiple source clips — the cross-source concat requires re-encoding to a common format anyway.
 
+**B-roll inserts.** A `stitch_clips` part that omits `transcript_file_id` is treated as b-roll: nothing is spoken in it, so it addresses its footage by time (`keep_ranges` is required), contributes no captions, gets no ±word padding, and is exempt from the same-recording overlap check unless it repeats the same file. Set `volume` (≈`0.15`–`0.3`, or `0`) to duck the clip's live ambience under the narration. Emerge's shot library is inventoried in `skills/video-production/references/broll-library.md`.
+
 ## Architecture
 
 ```
