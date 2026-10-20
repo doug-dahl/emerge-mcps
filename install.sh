@@ -90,7 +90,14 @@ ok "Python toolchain ready"
 
 # 3. Python engine (uv downloads a standalone Python the first time)
 say "Setting up the video engine (first run downloads Python — a moment)…"
-"$UV" venv "$VENV" --python 3.12 >/dev/null 2>&1 || die "Could not create the Python environment."
+# Reuse an existing venv (uv refuses to recreate one without --clear, which
+# made every re-run fail with "Could not create the Python environment").
+# Only (re)create if it's missing or its interpreter is broken.
+if ! "$VENV/bin/python" -c 'import sys' >/dev/null 2>&1; then
+  "$UV" venv "$VENV" --python 3.12 --clear >/dev/null 2>&1 || die "Could not create the Python environment."
+fi
+# Re-resolves against requirements.txt, so a venv that already has a bad
+# version (e.g. mcp 2.x) gets downgraded to one that matches the pins.
 "$UV" pip install --python "$VENV/bin/python" -q -r "$CLIP_DIR/requirements.txt" || die "Failed to install Python dependencies."
 ok "Engine ready"
 
