@@ -913,10 +913,14 @@ def list_clips_tool(student_folder_id: str) -> dict:
     folder_meta = drive.get_metadata(student_folder_id)
     event_types: dict[str, dict] = {}
 
-    for sub in drive.list_folder(student_folder_id):
-        if sub.mime_type != drive.FOLDER_MIME:
-            continue
-        children = drive.list_folder(sub.id)
+    subfolders = [
+        sub for sub in drive.list_folder(student_folder_id)
+        if sub.mime_type == drive.FOLDER_MIME
+    ]
+    # One Drive query for every event-type subfolder instead of one per folder.
+    children_by_folder = drive.list_folders([sub.id for sub in subfolders])
+    for sub in subfolders:
+        children = children_by_folder.get(sub.id, [])
 
         mp4s = {f.name: f for f in children if f.name.lower().endswith(".mp4")}
         txts = {f.name: f for f in children if f.name.lower().endswith(".txt")}

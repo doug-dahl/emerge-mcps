@@ -165,3 +165,61 @@ def list_folder(folder_id: str) -> list[DriveFile]:
     except HttpError as exc:
         raise DriveError(f"Drive list failed for folder {folder_id}: {exc}") from exc
     return results
+
+
+def list_folders(folder_ids: list[str]) -> dict[str, list[DriveFile]]:
+    """List immediate children of several folders in ONE Drive query.
+
+    Returns {folder_id: [children]} (folders with no children are absent).
+    Round trips matter: on a slow link each Drive call can take 3-6 s, and
+    Claude Desktop gives up on a tool call after about a minute, so one
+    query for N folders instead of N queries is the difference between
+    list_clips working and timing out.
+    """
+    folder_ids = [fid for fid in dict.fromkeys(folder_ids) if fid]
+    results: dict[str, list[DriveFile]] = {}
+    if not folder_ids:
+        return results
+    wanted = set(folder_ids)
+    parents_q = " or ".join(f"'{fid}' in parents" for fid in folder_ids)
+    # corpora="allDrives" is REQUIRED for a multi-parent OR query on a shared
+    # drive. With the default corpora Drive silently returns a fraction of the
+    # files (8 of 61 in testing) while still reporting incompleteSearch=false.
+    page_token: Optional[str] = None
+    try:
+        while True:
+            resp = (
+                get_service()
+                .files()
+                .list(
+                    q=f"({parents_q}) and trashed = false",
+                    fields="nextPageToken, incompleteSearch, files(id, name, mimeType, size, parents)",
+                    pageSize=200,
+                    pageToken=page_token,
+                    corpora="allDrives",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+            )
+            if resp.get("incompleteSearch") and len(folder_ids) > 1:
+                # Drive couldn't search everything in one go — fall back to
+                # the slow-but-exact one-query-per-folder path.
+                return {fid: list_folder(fid) for fid in folder_ids}
+            for f in resp.get("files", []):
+                df = DriveFile(
+                    id=f["id"],
+                    name=f["name"],
+                    mime_type=f.get("mimeType", ""),
+                    size=int(f["size"]) if "size" in f else None,
+                    parents=f.get("parents"),
+                )
+                for parent in df.parents or []:
+                    if parent in wanted:
+                        results.setdefault(parent, []).append(df)
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    except HttpError as exc:
+        raise DriveError(f"Drive list failed for folder(s) {', '.join(folder_ids)}: {exc}") from exc
+    return results
