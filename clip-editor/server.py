@@ -57,6 +57,34 @@ def _load_env_file() -> Optional[str]:
 # this is a harmless no-op there.
 _loaded_env_path = _load_env_file()
 
+
+def _prefer_ipv4() -> None:
+    """Try IPv4 addresses before IPv6 for every outbound connection.
+
+    httplib2 (used by the Google Drive client, including the service-account
+    token refresh) walks getaddrinfo() results in order and waits out its full
+    60 s timeout on each dead address before moving on. On a Mac whose IPv6
+    route to Google is broken, Google's AAAA record comes first, so every
+    Drive call stalled for a minute and Claude Desktop gave up. Re-sorting the
+    results IPv4-first (stable, so order within each family is preserved)
+    makes those machines connect instantly while still falling back to IPv6
+    if IPv4 fails. Set CLIP_EDITOR_PREFER_IPV4=0 to disable.
+    """
+    if os.environ.get("CLIP_EDITOR_PREFER_IPV4", "1").lower() in ("0", "false", "no"):
+        return
+    import socket
+
+    real_getaddrinfo = socket.getaddrinfo
+
+    def ipv4_first(*args, **kwargs):
+        results = real_getaddrinfo(*args, **kwargs)
+        return sorted(results, key=lambda r: r[0] != socket.AF_INET)
+
+    socket.getaddrinfo = ipv4_first
+
+
+_prefer_ipv4()
+
 import downloads  # noqa: E402
 import tools  # noqa: E402
 
